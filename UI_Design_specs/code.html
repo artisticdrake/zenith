@@ -1,0 +1,399 @@
+<!DOCTYPE html>
+
+<html class="light" lang="en"><head>
+<meta charset="utf-8"/>
+<meta content="width=device-width, initial-scale=1.0" name="viewport"/>
+<title>Executive Analyst - Premium Job Command Dashboard</title>
+<script src="https://cdn.tailwindcss.com?plugins=forms,container-queries"></script>
+<link href="https://fonts.googleapis.com/css2?family=Manrope:wght@400;500;600;700;800&amp;family=Inter:wght@300;400;500;600&amp;display=swap" rel="stylesheet"/>
+<link href="https://fonts.googleapis.com/css2?family=Material+Symbols+Outlined:wght,FILL@100..700,0..1&amp;display=swap" rel="stylesheet"/>
+<script id="tailwind-config">
+        tailwind.config = {
+            darkMode: "class",
+            theme: {
+                extend: {
+                    "colors": {
+                        "surface": "#fcfdfe",
+                        "on-secondary": "#ffffff",
+                        "primary-fixed": "#d6e3ff",
+                        "secondary-container": "#86f2e4",
+                        "on-secondary-container": "#006f66",
+                        "inverse-surface": "#2d3133",
+                        "on-surface-variant": "#5a6069",
+                        "on-primary": "#ffffff",
+                        "on-surface": "#0f172a",
+                        "error-container": "#ffdad6",
+                        "primary-fixed-dim": "#adc7f7",
+                        "on-tertiary-fixed-variant": "#5a00c6",
+                        "surface-container-highest": "#f1f5f9",
+                        "primary-container": "#1e293b",
+                        "on-tertiary-fixed": "#25005a",
+                        "on-tertiary-container": "#b089ff",
+                        "on-primary-container": "#94a3b8",
+                        "on-error-container": "#93000a",
+                        "surface-variant": "#f1f5f9",
+                        "on-secondary-fixed": "#00201d",
+                        "tertiary-container": "#4f46e5",
+                        "surface-bright": "#ffffff",
+                        "on-tertiary": "#ffffff",
+                        "surface-tint": "#334155",
+                        "on-primary-fixed": "#0f172a",
+                        "tertiary-fixed-dim": "#d2bbff",
+                        "surface-container-high": "#f8fafc",
+                        "surface-dim": "#e2e8f0",
+                        "surface-container": "#f1f5f9",
+                        "surface-container-low": "#f8fafc",
+                        "error": "#ef4444",
+                        "inverse-on-surface": "#f8fafc",
+                        "surface-container-lowest": "#ffffff",
+                        "secondary": "#0d9488",
+                        "outline": "#cbd5e1",
+                        "on-secondary-fixed-variant": "#0f766e",
+                        "background": "#fcfdfe",
+                        "outline-variant": "#e2e8f0",
+                        "primary": "#0f172a",
+                        "secondary-fixed-dim": "#5eead4",
+                        "tertiary-fixed": "#e0e7ff",
+                        "inverse-primary": "#94a3b8",
+                        "tertiary": "#4338ca",
+                        "secondary-fixed": "#99f6e4",
+                        "on-primary-fixed-variant": "#334155",
+                        "on-error": "#ffffff",
+                        "on-background": "#0f172a"
+                    },
+                    "borderRadius": {
+                        "DEFAULT": "0.375rem",
+                        "lg": "0.5rem",
+                        "xl": "1rem",
+                        "2xl": "1.5rem",
+                        "full": "9999px"
+                    },
+                    "fontFamily": {
+                        "headline": ["Manrope", "sans-serif"],
+                        "body": ["Inter", "sans-serif"],
+                        "label": ["Inter", "sans-serif"]
+                    },
+                    "boxShadow": {
+                        "premium": "0 10px 30px -5px rgba(0, 0, 0, 0.04), 0 4px 10px -4px rgba(0, 0, 0, 0.02)",
+                        "premium-hover": "0 20px 40px -10px rgba(0, 0, 0, 0.08), 0 8px 16px -6px rgba(0, 0, 0, 0.04)"
+                    }
+                },
+            },
+        }
+    </script>
+<style>
+        .material-symbols-outlined {
+            font-variation-settings: 'FILL' 0, 'wght' 300, 'GRAD' 0, 'opsz' 24;
+        }
+        body {
+            background-color: #fcfdfe;
+            font-family: 'Inter', sans-serif;
+            color: #0f172a;
+            -webkit-font-smoothing: antialiased;
+        }
+        .glass-sidebar {
+            background: rgba(255, 255, 255, 0.7);
+            backdrop-filter: blur(20px);
+            border-right: 1px solid rgba(0, 0, 0, 0.05);
+        }
+        .glass-header {
+            background: rgba(255, 255, 255, 0.8);
+            backdrop-filter: blur(12px);
+            border-bottom: 1px solid rgba(0, 0, 0, 0.03);
+        }
+        .chart-gradient {
+            background: linear-gradient(180deg, rgba(15, 23, 42, 0.9) 0%, rgba(30, 41, 59, 0.7) 100%);
+        }
+        .chart-bar-soft {
+            background: linear-gradient(180deg, rgba(241, 245, 249, 1) 0%, rgba(226, 232, 240, 0.8) 100%);
+        }
+    </style>
+</head>
+<body class="bg-surface selection:bg-secondary-container/30">
+<!-- Sidebar Navigation -->
+<aside class="h-screen w-72 fixed left-0 top-0 z-40 glass-sidebar flex flex-col p-6 gap-2 font-inter text-sm font-medium">
+<div class="mb-12 px-2 flex items-center gap-4">
+<div class="w-12 h-12 rounded-2xl bg-primary flex items-center justify-center text-white shadow-lg shadow-primary/20">
+<span class="material-symbols-outlined text-2xl" data-icon="leaderboard">leaderboard</span>
+</div>
+<div>
+<h1 class="text-xl font-extrabold font-manrope text-primary tracking-tight leading-none">Analyst</h1>
+<p class="text-[11px] text-slate-400 font-semibold uppercase tracking-widest mt-1">Command Center</p>
+</div>
+</div>
+<nav class="flex flex-col gap-2 flex-1">
+<a class="flex items-center gap-3 px-4 py-3.5 bg-primary text-white shadow-xl shadow-primary/10 rounded-xl transition-all duration-300" href="#">
+<span class="material-symbols-outlined" data-icon="dashboard">dashboard</span>
+<span class="tracking-tight font-semibold">Dashboard</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3.5 text-slate-500 hover:text-primary hover:bg-slate-100/50 rounded-xl transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="view_kanban">view_kanban</span>
+<span class="tracking-tight">Applications</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3.5 text-slate-500 hover:text-primary hover:bg-slate-100/50 rounded-xl transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="search">search</span>
+<span class="tracking-tight">Job Search</span>
+</a>
+<a class="flex items-center gap-3 px-4 py-3.5 text-slate-500 hover:text-primary hover:bg-slate-100/50 rounded-xl transition-all duration-200" href="#">
+<span class="material-symbols-outlined" data-icon="Description">description</span>
+<span class="tracking-tight">Resume Scoring</span>
+</a>
+</nav>
+<div class="mt-auto pt-8 flex flex-col gap-2 border-t border-slate-100">
+<a class="flex items-center gap-3 px-4 py-3 text-slate-400 hover:text-primary transition-colors" href="#">
+<span class="material-symbols-outlined" data-icon="help">help</span>
+<span class="tracking-tight">Help Center</span>
+</a>
+<div class="mt-6 p-4 rounded-2xl bg-slate-900 text-white flex items-center gap-3 shadow-2xl shadow-slate-900/20">
+<img alt="Executive User" class="w-10 h-10 rounded-xl object-cover ring-2 ring-white/10" src="https://lh3.googleusercontent.com/aida-public/AB6AXuB5SiOHVtU3PxmbnpfTHcaFk7ENUhBJy3_Zte7MLPxHhM1kZ2dleOnC6XN6tRlKiZKQh_7wcuIvpHSOGHLIUtjb3dBKpnFixqhmnOXAOfMugbM2kDCLrfjmR4K6tVNQgCE9AEsubVIPfUbnCXqnVjNzst7mccyjw32Fs_AqZuANF4liEa3aZy-YqRH_Dz5jb55_g3m8RjamoxFc4Xaae4wMcEdaxzobolkzgE7yJudlgicf-ku9zqMF63ikW84B37FANFYuOlFeLR0"/>
+<div class="overflow-hidden">
+<p class="font-bold text-[13px] truncate">Alex Sterling</p>
+<p class="text-[11px] text-slate-400 truncate">Senior Lead Analyst</p>
+</div>
+</div>
+</div>
+</aside>
+<!-- Top Navigation -->
+<header class="fixed top-0 right-0 left-72 h-20 z-50 glass-header flex justify-between items-center px-12">
+<div class="flex items-center gap-4 w-1/3">
+<div class="relative w-full max-w-sm">
+<span class="material-symbols-outlined absolute left-4 top-1/2 -translate-y-1/2 text-slate-400 text-xl">search</span>
+<input class="w-full bg-slate-100/50 border-transparent border focus:border-slate-200 focus:bg-white rounded-2xl py-2.5 pl-12 pr-4 text-sm focus:ring-0 placeholder-slate-400 font-inter transition-all" placeholder="Search insights..." type="text"/>
+</div>
+</div>
+<div class="flex items-center gap-6">
+<div class="flex items-center gap-2">
+<button class="p-2.5 rounded-xl hover:bg-slate-100 text-slate-500 transition-all active:scale-95 relative">
+<span class="material-symbols-outlined" data-icon="notifications">notifications</span>
+<span class="absolute top-2 right-2 w-2 h-2 bg-error rounded-full ring-2 ring-white"></span>
+</button>
+<button class="p-2.5 rounded-xl hover:bg-slate-100 text-slate-500 transition-all active:scale-95">
+<span class="material-symbols-outlined" data-icon="settings">settings</span>
+</button>
+</div>
+<div class="h-6 w-[1px] bg-slate-200"></div>
+<button class="bg-primary text-white px-8 py-2.5 rounded-xl font-bold text-sm tracking-tight shadow-lg shadow-primary/10 hover:shadow-primary/20 hover:-translate-y-0.5 transition-all active:scale-95">
+            Add Application
+        </button>
+</div>
+</header>
+<!-- Main Content -->
+<main class="ml-72 pt-32 pb-24 px-12 min-h-screen">
+<div class="max-w-[1440px] mx-auto space-y-12">
+<!-- Page Header -->
+<div class="flex items-end justify-between">
+<div class="space-y-2">
+<h2 class="text-4xl font-extrabold font-manrope tracking-tight text-primary">Executive Summary</h2>
+<p class="text-slate-500 font-body text-lg font-light tracking-tight">Q3 Performance &amp; Analytics Review</p>
+</div>
+<div class="flex items-center gap-3 bg-white p-1.5 rounded-2xl shadow-premium">
+<button class="px-5 py-2 rounded-xl text-xs font-bold text-slate-500 hover:text-primary transition-colors">Daily</button>
+<button class="px-5 py-2 rounded-xl text-xs font-bold bg-slate-100 text-primary">Monthly</button>
+<button class="px-5 py-2 rounded-xl text-xs font-bold text-slate-500 hover:text-primary transition-colors">Yearly</button>
+</div>
+</div>
+<!-- Bento Metrics Grid -->
+<div class="grid grid-cols-1 md:grid-cols-4 gap-8">
+<div class="bg-white p-8 rounded-2xl shadow-premium border border-slate-50/50 hover:shadow-premium-hover transition-all duration-500">
+<div class="flex justify-between items-start mb-6">
+<div class="p-3 bg-blue-50 text-blue-600 rounded-xl">
+<span class="material-symbols-outlined">description</span>
+</div>
+<span class="text-[11px] font-extrabold text-emerald-500 bg-emerald-50 px-2 py-1 rounded-lg">+12%</span>
+</div>
+<p class="text-[11px] font-extrabold uppercase tracking-[0.15em] text-slate-400 mb-2">Total Applications</p>
+<h3 class="text-5xl font-extrabold font-manrope text-primary tracking-tighter">142</h3>
+</div>
+<div class="bg-white p-8 rounded-2xl shadow-premium border border-slate-50/50 hover:shadow-premium-hover transition-all duration-500">
+<div class="flex justify-between items-start mb-6">
+<div class="p-3 bg-indigo-50 text-indigo-600 rounded-xl">
+<span class="material-symbols-outlined">event_available</span>
+</div>
+<span class="text-[11px] font-extrabold text-indigo-600 bg-indigo-50 px-2 py-1 rounded-lg">Active</span>
+</div>
+<p class="text-[11px] font-extrabold uppercase tracking-[0.15em] text-slate-400 mb-2">Interviews</p>
+<h3 class="text-5xl font-extrabold font-manrope text-primary tracking-tighter">28</h3>
+</div>
+<div class="bg-white p-8 rounded-2xl shadow-premium border border-slate-50/50 hover:shadow-premium-hover transition-all duration-500">
+<div class="flex justify-between items-start mb-6">
+<div class="p-3 bg-emerald-50 text-emerald-600 rounded-xl">
+<span class="material-symbols-outlined">military_tech</span>
+</div>
+<span class="text-[11px] font-extrabold text-emerald-600 bg-emerald-50 px-2 py-1 rounded-lg">High</span>
+</div>
+<p class="text-[11px] font-extrabold uppercase tracking-[0.15em] text-slate-400 mb-2">Offers</p>
+<h3 class="text-5xl font-extrabold font-manrope text-primary tracking-tighter">03</h3>
+</div>
+<div class="bg-white p-8 rounded-2xl shadow-premium border border-slate-50/50 hover:shadow-premium-hover transition-all duration-500">
+<div class="flex justify-between items-start mb-6">
+<div class="p-3 bg-amber-50 text-amber-600 rounded-xl">
+<span class="material-symbols-outlined">trending_up</span>
+</div>
+<span class="text-[11px] font-extrabold text-amber-600 bg-amber-50 px-2 py-1 rounded-lg">Top 5%</span>
+</div>
+<p class="text-[11px] font-extrabold uppercase tracking-[0.15em] text-slate-400 mb-2">Success Rate</p>
+<h3 class="text-5xl font-extrabold font-manrope text-primary tracking-tighter">19<span class="text-3xl">.7%</span></h3>
+</div>
+</div>
+<!-- Dashboard Centerfold -->
+<div class="grid grid-cols-1 lg:grid-cols-3 gap-12">
+<!-- Main Chart Area -->
+<div class="lg:col-span-2 bg-white rounded-[2rem] p-10 shadow-premium border border-slate-50 relative overflow-hidden">
+<div class="absolute top-0 right-0 w-64 h-64 bg-slate-50/50 rounded-full blur-[100px] -mr-32 -mt-32"></div>
+<div class="flex justify-between items-center mb-12 relative">
+<div>
+<h4 class="text-2xl font-extrabold font-manrope text-primary tracking-tight">Pipeline Efficiency</h4>
+<p class="text-sm text-slate-400 font-medium mt-1">Conversion trends &amp; outcome velocity</p>
+</div>
+<div class="flex bg-slate-100 p-1.5 rounded-xl gap-1">
+<button class="px-4 py-1.5 text-[11px] font-bold text-slate-500">Units</button>
+<button class="px-4 py-1.5 text-[11px] font-bold bg-white text-primary rounded-lg shadow-sm">Percentage</button>
+</div>
+</div>
+<!-- Modern Data Visualization -->
+<div class="h-72 flex items-end gap-5 px-4 relative">
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[35%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">Apr</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[45%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">May</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[65%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">Jun</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="relative w-full h-[95%]">
+<div class="chart-gradient w-full h-full rounded-2xl shadow-2xl shadow-slate-900/20 ring-4 ring-slate-100/50"></div>
+<div class="absolute -top-12 left-1/2 -translate-x-1/2 bg-slate-900 text-white text-[10px] font-bold px-3 py-1.5 rounded-lg shadow-xl">
+                                Peak: 92%
+                            </div>
+</div>
+<p class="mt-4 text-[10px] font-extrabold text-primary text-center uppercase tracking-widest">Jul</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[80%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">Aug</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[55%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">Sep</p>
+</div>
+<div class="flex-1 group h-full flex flex-col justify-end">
+<div class="chart-bar-soft w-full h-[40%] rounded-2xl group-hover:bg-slate-300 transition-all duration-500"></div>
+<p class="mt-4 text-[10px] font-bold text-slate-400 text-center uppercase tracking-widest">Oct</p>
+</div>
+</div>
+</div>
+<!-- Active Pursuits Sidebar -->
+<div class="bg-slate-50/50 rounded-[2rem] p-8 border border-slate-100/50 space-y-8">
+<div class="flex justify-between items-center px-2">
+<h4 class="text-xs font-black font-manrope text-primary uppercase tracking-[0.2em]">Active Pursuits</h4>
+<span class="w-2 h-2 rounded-full bg-emerald-400 animate-pulse"></span>
+</div>
+<div class="space-y-4">
+<!-- Pursuit Card 1 -->
+<div class="bg-white p-5 rounded-2xl shadow-premium hover:translate-y-[-4px] transition-all duration-300 group cursor-pointer border border-transparent hover:border-indigo-100">
+<div class="flex justify-between items-start mb-3">
+<h5 class="font-bold text-sm text-primary tracking-tight">Senior Data Strategist</h5>
+<span class="text-[9px] font-black bg-indigo-50 text-indigo-600 px-2.5 py-1 rounded-full uppercase tracking-wider">Interviewing</span>
+</div>
+<p class="text-xs text-slate-400 font-medium">Lumina Global Corp</p>
+<div class="mt-5 space-y-2">
+<div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+<span>Progress</span>
+<span class="text-indigo-600">80%</span>
+</div>
+<div class="w-full bg-slate-50 rounded-full h-1.5 overflow-hidden">
+<div class="bg-indigo-500 h-full rounded-full transition-all duration-1000" style="width: 80%"></div>
+</div>
+</div>
+</div>
+<!-- Pursuit Card 2 -->
+<div class="bg-white p-5 rounded-2xl shadow-premium hover:translate-y-[-4px] transition-all duration-300 group cursor-pointer border border-transparent hover:border-emerald-100">
+<div class="flex justify-between items-start mb-3">
+<h5 class="font-bold text-sm text-primary tracking-tight">VP of Infrastructure</h5>
+<span class="text-[9px] font-black bg-emerald-50 text-emerald-600 px-2.5 py-1 rounded-full uppercase tracking-wider">Applied</span>
+</div>
+<p class="text-xs text-slate-400 font-medium">Northstar FinTech</p>
+<div class="mt-5 space-y-2">
+<div class="flex justify-between text-[10px] font-bold text-slate-400 uppercase tracking-widest">
+<span>Progress</span>
+<span class="text-emerald-600">25%</span>
+</div>
+<div class="w-full bg-slate-50 rounded-full h-1.5 overflow-hidden">
+<div class="bg-emerald-500 h-full rounded-full transition-all duration-1000" style="width: 25%"></div>
+</div>
+</div>
+</div>
+</div>
+<button class="w-full group py-4 text-xs font-black text-primary hover:bg-white rounded-2xl transition-all flex items-center justify-center gap-2 border border-slate-100 hover:border-primary/10">
+                    VIEW FULL PIPELINE
+                    <span class="material-symbols-outlined text-sm group-hover:translate-x-1 transition-transform">arrow_forward</span>
+</button>
+</div>
+</div>
+<!-- Secondary Insights Section -->
+<div class="grid grid-cols-1 md:grid-cols-2 gap-12 pt-4">
+<div class="bg-white rounded-[2rem] p-10 shadow-premium border border-slate-50 relative overflow-hidden flex flex-col justify-between">
+<div class="relative z-10">
+<div class="flex items-center gap-3 mb-6">
+<div class="w-10 h-10 bg-slate-50 flex items-center justify-center rounded-xl">
+<span class="material-symbols-outlined text-slate-400">public</span>
+</div>
+<h4 class="text-xl font-extrabold font-manrope text-primary tracking-tight">Network Reach</h4>
+</div>
+<p class="text-slate-500 mb-8 leading-relaxed max-w-sm">Your professional visibility is trending significantly in the <span class="font-bold text-primary italic">Automotive</span> and <span class="font-bold text-primary italic">SaaS</span> sectors.</p>
+<div class="flex items-center gap-6">
+<div class="flex -space-x-4">
+<img alt="Recruiter" class="w-12 h-12 rounded-2xl ring-4 ring-white object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuClK3KRFqF-IhAQnU3oxHNT2ZAjiesblTpOM8bLhOomEirRO3UKEopDPJZNKw2udWqBtxaZnH79OH71mamyNLeJ8eQP5xtjotMuxLMSSewdROXCv9L-8Ok_lyA9sVOc-2PRuAi0zv8gnWLhl1YpAh2Lu5OblKqF3CAJip1v7GAZdey-Dej86QfWpXrIwOB00MJmm9XntPn0AJnUEzSdfn13NmklyQlvV3aiG21chul95rYeZwflFAwqrpGieDBo-uFPIMiEiPLi4J4"/>
+<img alt="Recruiter" class="w-12 h-12 rounded-2xl ring-4 ring-white object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuAKygqFqSH2QCywNKvUFNROyoJ8I_iV-e62hMM3ChUdzr9vW66XPcGA_Y6UAQX9fTAW9fDsGJrewLVshVSU8Bk1uWHg925NGyFAfGG5jsh9kulvHzYyU-nnHeL3OjvTl2zah5fyRdeSYM7t-JE1HJpZfyUcsEvFjCuOaCUoUc1K6_wXnr5GrPSUYTC8jpVRslyZN4VWhVZMmp0dhptvyrxlHk4rVsI4SQorZijdMcMGLQ3ziPtQ4D6EBbvYqTR9MSlsx2nyHmHb334"/>
+<img alt="Recruiter" class="w-12 h-12 rounded-2xl ring-4 ring-white object-cover" src="https://lh3.googleusercontent.com/aida-public/AB6AXuBloUndqfOwZxP3nAIUL6eWK7JyCv-L7IMvl2ClwUFcUVa4hEHrAZD1MrzMVSGNp4XtbNSUaRCMj4qGDCsI3Tzm9I6mGfID2EBm3zyYJifa8CMSZtBEGcUow0DWdFNzLdehP7tku59IBMyP5_pnjshIXV4_peWk2ZBv9mX1aasx3KMrMhYtWp6PkEZ5dY0JQAwkNf-jJ6q9ynCbh1jXP2BLG4EBYGcu4TcLQ4T3BpkL-3qkg1Ro4pxlZQDqokOUbg238Wo7mnb0KiM"/>
+<div class="w-12 h-12 rounded-2xl ring-4 ring-white bg-slate-900 flex items-center justify-center text-[10px] font-black text-white">+18</div>
+</div>
+<div class="flex-1">
+<p class="text-[10px] font-black text-slate-400 uppercase tracking-widest mb-1">Weekly Views</p>
+<div class="flex items-center gap-2">
+<span class="text-xl font-extrabold text-primary">2.4k</span>
+<span class="text-[10px] font-bold text-emerald-500 flex items-center bg-emerald-50 px-1.5 py-0.5 rounded-md">
+<span class="material-symbols-outlined text-[12px] leading-none mr-0.5">trending_up</span>
+                                    22%
+                                </span>
+</div>
+</div>
+</div>
+</div>
+<div class="absolute -right-20 -bottom-20 w-80 h-80 bg-slate-100 rounded-full blur-[120px] pointer-events-none"></div>
+</div>
+<div class="bg-primary text-white rounded-[2rem] p-10 shadow-2xl shadow-primary/30 relative overflow-hidden group">
+<div class="relative z-10 h-full flex flex-col">
+<div class="flex items-center gap-3 mb-8">
+<div class="w-10 h-10 bg-white/10 backdrop-blur-md border border-white/10 flex items-center justify-center rounded-xl">
+<span class="material-symbols-outlined text-emerald-400">verified</span>
+</div>
+<span class="text-[10px] font-black uppercase tracking-[0.25em] text-white/50">Executive Advisory</span>
+</div>
+<h4 class="text-3xl font-extrabold font-manrope mb-4 leading-tight">Resume Score Optimization</h4>
+<p class="text-slate-400 text-lg font-light leading-relaxed mb-10 max-w-md italic">
+                        "Your current profile profile index is at <span class="text-white font-medium">82%</span>. Adding specific <span class="text-white font-medium">Cloud Infrastructure</span> keywords will boost VP-level matching."
+                    </p>
+<button class="mt-auto self-start bg-white text-primary px-10 py-4 rounded-2xl font-black text-xs uppercase tracking-widest shadow-xl shadow-black/10 hover:shadow-black/20 hover:scale-105 transition-all duration-300">
+                        Optimize Profile
+                    </button>
+</div>
+<!-- Abstract Design Elements -->
+<div class="absolute top-0 right-0 w-1/2 h-full opacity-[0.03] pointer-events-none p-10">
+<svg class="w-full h-full text-white fill-current" viewbox="0 0 100 100">
+<rect height="80" rx="4" width="20" x="10" y="10"></rect>
+<rect height="60" rx="4" width="20" x="40" y="30"></rect>
+<rect height="90" rx="4" width="20" x="70" y="0"></rect>
+</svg>
+</div>
+<div class="absolute -left-20 -top-20 w-64 h-64 bg-white/5 rounded-full blur-[80px]"></div>
+</div>
+</div>
+</div>
+</main>
+</body></html>

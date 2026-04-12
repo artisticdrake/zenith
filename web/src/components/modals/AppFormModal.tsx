@@ -185,7 +185,7 @@ export default function AppFormModal({
             Cancel
           </Button>
           <Button type="submit" form="app-form"
-            className="bg-gradient-to-r from-primary to-violet-500 hover:from-primary/90 hover:to-violet-500/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold text-[13px]">
+            className="bg-gradient-to-r from-primary to-teal-700 hover:from-primary/90 hover:to-teal-700/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold text-[13px]">
             {editId ? "Update" : "Create"} Application
           </Button>
         </DialogFooter>

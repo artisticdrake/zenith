@@ -16,12 +16,12 @@ interface AppDetailModalProps {
 }
 
 const AVATAR_PALETTES = [
-  { bg: "from-blue-500/30 to-indigo-600/20",   text: "text-blue-300",   border: "border-blue-500/20"   },
-  { bg: "from-violet-500/30 to-purple-600/20", text: "text-violet-300", border: "border-violet-500/20" },
-  { bg: "from-emerald-500/30 to-teal-600/20",  text: "text-emerald-300",border: "border-emerald-500/20"},
-  { bg: "from-amber-500/30 to-orange-600/20",  text: "text-amber-300",  border: "border-amber-500/20"  },
-  { bg: "from-pink-500/30 to-rose-600/20",     text: "text-pink-300",   border: "border-pink-500/20"   },
-  { bg: "from-cyan-500/30 to-sky-600/20",      text: "text-cyan-300",   border: "border-cyan-500/20"   },
+  { bg: "from-blue-500/25 to-blue-900/20",      text: "text-blue-300",   border: "border-blue-500/15"   },
+  { bg: "from-primary/25 to-teal-900/20",      text: "text-primary",    border: "border-primary/15"    },
+  { bg: "from-emerald-500/25 to-teal-900/20",  text: "text-emerald-300",border: "border-emerald-500/15"},
+  { bg: "from-amber-500/25 to-orange-900/20",  text: "text-amber-300",  border: "border-amber-500/15"  },
+  { bg: "from-pink-500/25 to-rose-900/20",     text: "text-pink-300",   border: "border-pink-500/15"   },
+  { bg: "from-cyan-500/25 to-sky-900/20",      text: "text-cyan-300",   border: "border-cyan-500/15"   },
 ];
 
 function CompanyAvatar({ company }: { company: string }) {
@@ -87,7 +87,7 @@ export default function AppDetailModal({ app, onClose, onEdit }: AppDetailModalP
             <div className="grid grid-cols-2 gap-3">
               {[
                 { icon: Calendar,   label: "Applied",      value: formatDate(app.dateApplied),       iconBg: "bg-blue-500/10",    iconColor: "text-blue-400"    },
-                { icon: Clock,      label: "Last Updated", value: formatShortDate(app.last_updated), iconBg: "bg-violet-500/10",  iconColor: "text-violet-400"  },
+                { icon: Clock,      label: "Last Updated", value: formatShortDate(app.last_updated), iconBg: "bg-primary/10",     iconColor: "text-primary"     },
                 { icon: MapPin,     label: "Location",     value: app.location || "—",               iconBg: "bg-emerald-500/10", iconColor: "text-emerald-400" },
                 { icon: DollarSign, label: "Salary",       value: app.salary || "—",                 iconBg: "bg-amber-500/10",   iconColor: "text-amber-400"   },
               ].map(({ icon: Icon, label, value, iconBg, iconColor }) => (

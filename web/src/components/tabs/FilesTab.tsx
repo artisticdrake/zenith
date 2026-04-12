@@ -67,7 +67,7 @@ export default function FilesTab({
         <Button
           onClick={() => fileInputRef.current?.click()}
           disabled={!canUpload}
-          className="gap-2 bg-gradient-to-r from-primary to-violet-500 hover:from-primary/90 hover:to-violet-500/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold disabled:from-muted disabled:to-muted disabled:shadow-none"
+          className="gap-2 bg-gradient-to-r from-primary to-teal-700 hover:from-primary/90 hover:to-teal-700/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold disabled:from-muted disabled:to-muted disabled:shadow-none"
         >
           {resumeUploading ? (
             <><Loader2 className="h-4 w-4 animate-spin" /> Uploading…</>
@@ -206,7 +206,7 @@ export default function FilesTab({
             className={cn(
               "h-1 flex-1 rounded-full transition-all duration-300",
               i < resumes.length
-                ? "bg-gradient-to-r from-primary to-violet-500"
+                ? "bg-gradient-to-r from-primary to-teal-700"
                 : "bg-white/[0.06]"
             )}
           />

@@ -29,31 +29,24 @@ export default function Login() {
   return (
     <div className="relative min-h-screen flex items-center justify-center bg-background overflow-hidden">
 
-      {/* ── Ambient orbs ─────────────────────────────────────────────── */}
-      <div className="pointer-events-none absolute inset-0 overflow-hidden">
-        {/* Top-left violet orb */}
+      {/* ── Ambient orbs — dark mode only ────────────────────────────── */}
+      <div className="pointer-events-none absolute inset-0 overflow-hidden hidden dark:block">
         <div
           className="absolute -top-[20%] -left-[10%] h-[600px] w-[600px] rounded-full animate-glow-pulse"
-          style={{ background: "radial-gradient(circle, hsl(252 91% 64% / 0.12) 0%, transparent 70%)" }}
+          style={{ background: "radial-gradient(circle, hsl(167 76% 57% / 0.10) 0%, transparent 70%)" }}
         />
-        {/* Bottom-right cyan orb */}
         <div
           className="absolute -bottom-[20%] -right-[10%] h-[500px] w-[500px] rounded-full animate-glow-pulse [animation-delay:1.5s]"
-          style={{ background: "radial-gradient(circle, hsl(200 95% 55% / 0.08) 0%, transparent 70%)" }}
-        />
-        {/* Center deep glow */}
-        <div
-          className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 h-[800px] w-[800px] rounded-full"
-          style={{ background: "radial-gradient(circle, hsl(252 91% 64% / 0.04) 0%, transparent 65%)" }}
+          style={{ background: "radial-gradient(circle, hsl(167 76% 57% / 0.06) 0%, transparent 70%)" }}
         />
       </div>
 
-      {/* ── Grid pattern ─────────────────────────────────────────────── */}
+      {/* ── Subtle grid pattern ───────────────────────────────────────── */}
       <div
-        className="pointer-events-none absolute inset-0 opacity-[0.018]"
+        className="pointer-events-none absolute inset-0 opacity-[0.03] dark:opacity-[0.015]"
         style={{
           backgroundImage:
-            "linear-gradient(rgba(255,255,255,1) 1px, transparent 1px), linear-gradient(90deg, rgba(255,255,255,1) 1px, transparent 1px)",
+            "linear-gradient(hsl(var(--foreground)) 1px, transparent 1px), linear-gradient(90deg, hsl(var(--foreground)) 1px, transparent 1px)",
           backgroundSize: "52px 52px",
         }}
       />
@@ -63,8 +56,8 @@ export default function Login() {
 
         {/* Logo + headline */}
         <div className="mb-10 text-center">
-          <div className="mx-auto mb-6 inline-flex h-[72px] w-[72px] items-center justify-center rounded-3xl bg-gradient-to-br from-primary to-violet-500 shadow-2xl shadow-primary/30 ring-1 ring-white/10">
-            <Briefcase className="h-9 w-9 text-white" />
+          <div className="mx-auto mb-6 inline-flex h-[72px] w-[72px] items-center justify-center rounded-3xl bg-primary shadow-2xl shadow-primary/20 ring-1 ring-primary/10">
+            <Briefcase className="h-9 w-9 text-primary-foreground" />
           </div>
 
           <h1 className="text-[42px] font-black leading-none tracking-tight mb-3">
@@ -81,7 +74,7 @@ export default function Login() {
             {FEATURES.map(({ icon: Icon, label }) => (
               <span
                 key={label}
-                className="inline-flex items-center gap-1.5 rounded-full border border-white/[0.08] bg-white/[0.04] px-3 py-1.5 text-xs font-medium text-muted-foreground backdrop-blur-sm"
+                className="inline-flex items-center gap-1.5 rounded-full border border-border bg-muted/60 px-3 py-1.5 text-xs font-medium text-muted-foreground dark:border-white/[0.08] dark:bg-white/[0.04]"
               >
                 <Icon className="h-3 w-3 text-primary" />
                 {label}
@@ -91,7 +84,7 @@ export default function Login() {
         </div>
 
         {/* ── Auth card ────────────────────────────────────────────── */}
-        <div className="glass-strong rounded-2xl p-7 shadow-2xl shadow-black/40">
+        <div className="glass-strong rounded-2xl p-7">
           <p className="mb-1 text-[17px] font-bold">Welcome</p>
           <p className="mb-6 text-sm text-muted-foreground">
             Sign in to continue to your dashboard
@@ -100,7 +93,7 @@ export default function Login() {
           <button
             onClick={handleLogin}
             disabled={loading}
-            className="group relative w-full flex items-center gap-3 rounded-xl border border-white/[0.1] bg-white/[0.06] px-5 py-4 text-sm font-semibold text-foreground transition-all duration-200 hover:bg-white/[0.09] hover:border-white/[0.15] hover:shadow-lg hover:shadow-primary/10 disabled:pointer-events-none disabled:opacity-50 active:scale-[0.99]"
+            className="group relative w-full flex items-center gap-3 rounded-xl border border-border bg-background px-5 py-4 text-sm font-semibold text-foreground transition-all duration-200 hover:bg-muted hover:shadow-md disabled:pointer-events-none disabled:opacity-50 active:scale-[0.99] dark:border-white/[0.1] dark:bg-white/[0.04] dark:hover:bg-white/[0.07]"
           >
             {loading ? (
               <Loader2 className="h-4 w-4 shrink-0 animate-spin text-primary" />
@@ -132,7 +125,7 @@ export default function Login() {
           </p>
         </div>
 
-        <p className="mt-5 text-center text-[11px] text-muted-foreground/35 tracking-wide uppercase">
+        <p className="mt-5 text-center text-[11px] text-muted-foreground/40 tracking-wide uppercase">
           End-to-end encrypted · Powered by Supabase
         </p>
       </div>

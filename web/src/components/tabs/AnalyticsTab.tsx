@@ -10,19 +10,20 @@ import { useCountUp } from "@/lib/useCountUp";
 
 /* ── Palette ─────────────────────────────────────────────────────────────── */
 const CHART_COLORS = [
-  "#818cf8", "#60a5fa", "#34d399", "#fbbf24",
-  "#a78bfa", "#f87171", "#38bdf8", "#4ade80",
+  "#41e4c0", "#b9c7e4", "#bcc6e5", "#5ffbd6",
+  "#74829d", "#38debb", "#d8e2ff", "#253453",
 ];
 
 const TOOLTIP_STYLE: React.CSSProperties = {
-  background: "hsl(225 20% 7%)",
-  border: "1px solid rgba(255,255,255,0.08)",
-  borderRadius: "10px",
+  background: "rgba(37, 52, 83, 0.9)",
+  border: "1px solid rgba(65, 228, 192, 0.15)",
+  borderRadius: "8px",
   fontSize: 12,
-  color: "hsl(220 18% 93%)",
-  boxShadow: "0 20px 40px rgba(0,0,0,0.4)",
+  color: "hsl(225 100% 92%)",
+  boxShadow: "0 4px 20px rgba(0, 13, 39, 0.4), 0 12px 40px rgba(0, 0, 0, 0.2)",
+  backdropFilter: "blur(12px)",
 };
-const TICK_STYLE = { fontSize: 11, fill: "rgba(255,255,255,0.28)" };
+const TICK_STYLE = { fontSize: 11, fill: "#94a3b8" };
 
 /* ── Types ───────────────────────────────────────────────────────────────── */
 interface AnalyticsStats {
@@ -46,11 +47,11 @@ interface AnalyticsTabProps {
 
 /* ── Metric config ───────────────────────────────────────────────────────── */
 const METRIC_CONFIG = [
-  { key: "responseRate",        label: "Response Rate",      suffix: "%",  icon: TrendingUp, iconBg: "bg-emerald-500/15", iconColor: "text-emerald-400", numColor: "text-emerald-300",  isSalary: false },
-  { key: "avgResponseTime",     label: "Avg Response",       suffix: "d",  icon: Clock,      iconBg: "bg-blue-500/15",    iconColor: "text-blue-400",    numColor: "text-blue-300",    isSalary: false },
-  { key: "screeningConversion", label: "Screening Rate",     suffix: "%",  icon: Users,      iconBg: "bg-violet-500/15", iconColor: "text-violet-400",  numColor: "text-violet-300",  isSalary: false },
-  { key: "interviewConversion", label: "Interview Rate",     suffix: "%",  icon: Target,     iconBg: "bg-amber-500/15",  iconColor: "text-amber-400",   numColor: "text-amber-300",   isSalary: false },
-  { key: "offerConversion",     label: "Offer Rate",         suffix: "%",  icon: Award,      iconBg: "bg-emerald-500/15",iconColor: "text-emerald-400", numColor: "text-emerald-300", isSalary: false },
+  { key: "responseRate",        label: "Response Rate",      suffix: "%",  icon: TrendingUp, iconBg: "bg-primary/15",    iconColor: "text-primary",     numColor: "gradient-text",    isSalary: false },
+  { key: "avgResponseTime",     label: "Avg Response",       suffix: "d",  icon: Clock,      iconBg: "bg-blue-500/15",   iconColor: "text-blue-400",    numColor: "text-blue-600 dark:text-blue-300",    isSalary: false },
+  { key: "screeningConversion", label: "Screening Rate",     suffix: "%",  icon: Users,      iconBg: "bg-primary/10",    iconColor: "text-primary",     numColor: "gradient-text-cyan", isSalary: false },
+  { key: "interviewConversion", label: "Interview Rate",     suffix: "%",  icon: Target,     iconBg: "bg-amber-500/15",  iconColor: "text-amber-400",   numColor: "text-amber-600 dark:text-amber-300",   isSalary: false },
+  { key: "offerConversion",     label: "Offer Rate",         suffix: "%",  icon: Award,      iconBg: "bg-emerald-500/15",iconColor: "text-emerald-400", numColor: "text-emerald-600 dark:text-emerald-300", isSalary: false },
   { key: "medianSalary",        label: "Median Offer",       suffix: "",   icon: DollarSign, iconBg: "bg-primary/15",    iconColor: "text-primary",     numColor: "gradient-text",    isSalary: true  },
 ];
 
@@ -74,10 +75,11 @@ function MetricCard({ cfg, raw, index }: { cfg: typeof METRIC_CONFIG[0]; raw: st
 
   return (
     <div className={cn(
-      "group relative overflow-hidden rounded-xl border border-white/[0.07] glass p-5 transition-all duration-300 hover:border-white/[0.12] hover:shadow-xl animate-slide-up",
+      "group relative overflow-hidden rounded-xl border border-white/[0.06] tonal-lift p-5 transition-all duration-300 hover:border-white/[0.12] animate-slide-up",
       STAGGER[index]
     )}>
-      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 shine rounded-xl" />
+      {/* Left accent notch on hover */}
+      <div className="absolute left-0 top-0 h-full w-0.5 bg-primary opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
       <div className="relative">
         <div className="flex items-center justify-between mb-3.5">
           <span className="text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground/60">
@@ -99,7 +101,7 @@ function MetricCard({ cfg, raw, index }: { cfg: typeof METRIC_CONFIG[0]; raw: st
 function EmptyChart({ label }: { label: string }) {
   return (
     <div className="h-52 flex flex-col items-center justify-center gap-2">
-      <div className="h-10 w-10 rounded-2xl border border-white/[0.06] bg-white/[0.03] flex items-center justify-center">
+      <div className="h-10 w-10 rounded-2xl border border-border/50 bg-muted/30 dark:border-white/[0.06] dark:bg-white/[0.03] flex items-center justify-center">
         <TrendingUp className="h-4 w-4 text-muted-foreground/20" />
       </div>
       <span className="text-xs text-muted-foreground/40">No {label.toLowerCase()} data yet</span>
@@ -110,9 +112,9 @@ function EmptyChart({ label }: { label: string }) {
 /* ── Chart card wrapper ──────────────────────────────────────────────────── */
 function ChartCard({ title, children, delay = "" }: { title: string; children: React.ReactNode; delay?: string }) {
   return (
-    <div className={cn("overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up", delay)}>
+    <div className={cn("overflow-hidden rounded-xl glass animate-slide-up", delay)}>
       <div className="px-5 pt-5 pb-2">
-        <h3 className="text-[13px] font-bold text-foreground/80">{title}</h3>
+        <h3 className="text-[13px] font-semibold text-foreground/80 font-headline">{title}</h3>
       </div>
       <div className="px-5 pb-5">{children}</div>
     </div>
@@ -128,14 +130,14 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
   };
 
   const funnelData = [
-    { stage: "Applied",   count: stats.statusCounts["Applied"] ?? 0,   color: "#60a5fa", bg: "bg-blue-500" },
-    { stage: "Screening", count: stats.statusCounts["Screening"] ?? 0, color: "#fbbf24", bg: "bg-amber-500" },
+    { stage: "Applied",   count: stats.statusCounts["Applied"] ?? 0,   color: "#b9c7e4", bg: "#b9c7e4" },
+    { stage: "Screening", count: stats.statusCounts["Screening"] ?? 0, color: "#fbbf24", bg: "#fbbf24" },
     {
       stage: "Interview",
       count: (stats.statusCounts["Interview Scheduled"] ?? 0) + (stats.statusCounts["Interview Completed"] ?? 0),
-      color: "#a78bfa", bg: "bg-violet-500",
+      color: "#5ffbd6", bg: "#5ffbd6",
     },
-    { stage: "Offer",     count: stats.statusCounts["Offer"] ?? 0,     color: "#34d399", bg: "bg-emerald-500" },
+    { stage: "Offer",     count: stats.statusCounts["Offer"] ?? 0,     color: "#41e4c0", bg: "#41e4c0" },
   ];
   const funnelMax = funnelData[0]?.count || 1;
 
@@ -196,8 +198,8 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
                 <BarChart data={sourceData} margin={{ top: 4, right: 4, bottom: 4, left: -24 }}>
                   <defs>
                     <linearGradient id="barGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%"   stopColor="hsl(252 91% 68%)" stopOpacity={1}   />
-                      <stop offset="100%" stopColor="hsl(280 90% 65%)" stopOpacity={0.7} />
+                      <stop offset="0%"   stopColor="#41e4c0" stopOpacity={1}   />
+                      <stop offset="100%" stopColor="#38debb" stopOpacity={0.7} />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
@@ -219,8 +221,8 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
                 <AreaChart data={stats.weeks} margin={{ top: 4, right: 4, bottom: 4, left: -24 }}>
                   <defs>
                     <linearGradient id="areaGrad" x1="0" y1="0" x2="0" y2="1">
-                      <stop offset="0%"   stopColor="hsl(252 91% 64%)" stopOpacity={0.3} />
-                      <stop offset="100%" stopColor="hsl(252 91% 64%)" stopOpacity={0}   />
+                      <stop offset="0%"   stopColor="#41e4c0" stopOpacity={0.3} />
+                      <stop offset="100%" stopColor="#41e4c0" stopOpacity={0}   />
                     </linearGradient>
                   </defs>
                   <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
@@ -229,10 +231,10 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
                   <Tooltip contentStyle={TOOLTIP_STYLE} />
                   <Area
                     type="monotone" dataKey="count"
-                    stroke="hsl(252 91% 68%)" fill="url(#areaGrad)"
+                    stroke="#41e4c0" fill="url(#areaGrad)"
                     strokeWidth={2.5}
-                    dot={{ fill: "hsl(252 91% 68%)", strokeWidth: 0, r: 3.5 }}
-                    activeDot={{ r: 5, strokeWidth: 0, fill: "hsl(252 91% 72%)" }}
+                    dot={{ fill: "#41e4c0", strokeWidth: 0, r: 3.5 }}
+                    activeDot={{ r: 5, strokeWidth: 0, fill: "#5ffbd6" }}
                   />
                 </AreaChart>
               </ResponsiveContainer>
@@ -256,8 +258,8 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
                   </div>
                   <div className="h-1.5 w-full overflow-hidden rounded-full bg-white/[0.05]">
                     <div
-                      className={cn("h-full rounded-full transition-all duration-700", bg)}
-                      style={{ width: `${pct}%` }}
+                      className="h-full rounded-full transition-all duration-700"
+                      style={{ width: `${pct}%`, background: bg }}
                     />
                   </div>
                 </div>

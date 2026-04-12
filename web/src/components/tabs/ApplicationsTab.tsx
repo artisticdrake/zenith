@@ -1,7 +1,6 @@
 import {
   Plus, Search, Edit2, Trash2, ExternalLink, Sparkles, Wand2,
-  Loader2, Clock, AlertCircle, TrendingUp, Award, XCircle,
-  CheckCircle, Building2,
+  Loader2, Building2, LayoutList, Send, Eye, CalendarDays, Trophy, Ban,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
@@ -41,68 +40,62 @@ const STAT_CARDS = [
   {
     key: "total",
     label: "Total",
-    icon: CheckCircle,
-    accent: "from-slate-400/20 to-slate-600/5",
-    iconBg: "bg-slate-500/20",
-    iconColor: "text-slate-300",
-    numClass: "text-slate-200",
-    glow: "",
-    border: "border-slate-500/20",
+    icon: LayoutList,
+    accent: "from-white/[0.03] to-transparent",
+    iconBg: "bg-primary/10",
+    iconColor: "text-primary",
+    numClass: "text-foreground",
+    border: "border-white/[0.06]",
   },
   {
     key: "Applied",
     label: "Applied",
-    icon: Clock,
-    accent: "from-blue-500/20 to-blue-700/5",
-    iconBg: "bg-blue-500/20",
+    icon: Send,
+    accent: "from-blue-500/10 to-transparent",
+    iconBg: "bg-blue-500/15",
     iconColor: "text-blue-400",
     numClass: "gradient-text-cyan",
-    glow: "hover:glow-blue",
-    border: "border-blue-500/20",
+    border: "border-white/[0.06]",
   },
   {
     key: "Screening",
     label: "Screening",
-    icon: AlertCircle,
-    accent: "from-amber-500/20 to-amber-700/5",
-    iconBg: "bg-amber-500/20",
+    icon: Eye,
+    accent: "from-amber-500/10 to-transparent",
+    iconBg: "bg-amber-500/15",
     iconColor: "text-amber-400",
-    numClass: "text-amber-300",
-    glow: "hover:glow-amber",
-    border: "border-amber-500/20",
+    numClass: "text-amber-600 dark:text-amber-300",
+    border: "border-white/[0.06]",
   },
   {
     key: "Interview",
     label: "Interview",
-    icon: TrendingUp,
-    accent: "from-violet-500/20 to-violet-700/5",
-    iconBg: "bg-violet-500/20",
-    iconColor: "text-violet-400",
-    numClass: "text-violet-300",
-    glow: "hover:glow-violet",
-    border: "border-violet-500/20",
+    icon: CalendarDays,
+    accent: "from-primary/10 to-transparent",
+    iconBg: "bg-primary/15",
+    iconColor: "text-primary",
+    numClass: "gradient-text",
+    border: "border-white/[0.06]",
   },
   {
     key: "Offer",
     label: "Offers",
-    icon: Award,
-    accent: "from-emerald-500/20 to-emerald-700/5",
-    iconBg: "bg-emerald-500/20",
+    icon: Trophy,
+    accent: "from-emerald-500/10 to-transparent",
+    iconBg: "bg-emerald-500/15",
     iconColor: "text-emerald-400",
-    numClass: "text-emerald-300",
-    glow: "hover:glow-emerald",
-    border: "border-emerald-500/20",
+    numClass: "text-emerald-600 dark:text-emerald-300",
+    border: "border-white/[0.06]",
   },
   {
     key: "Rejected",
     label: "Rejected",
-    icon: XCircle,
-    accent: "from-red-500/20 to-red-700/5",
-    iconBg: "bg-red-500/20",
+    icon: Ban,
+    accent: "from-red-500/10 to-transparent",
+    iconBg: "bg-red-500/15",
     iconColor: "text-red-400",
-    numClass: "text-red-300",
-    glow: "hover:glow-red",
-    border: "border-red-500/20",
+    numClass: "text-red-500 dark:text-red-300",
+    border: "border-white/[0.06]",
   },
 ];
 
@@ -122,16 +115,16 @@ function AnimatedStatCard({
   return (
     <div
       className={cn(
-        "group relative overflow-hidden rounded-xl border glass transition-all duration-300 hover:border-white/[0.12] hover:shadow-xl animate-slide-up cursor-default",
+        "group relative overflow-hidden rounded-xl border transition-all duration-300 hover:border-white/[0.12] animate-slide-up cursor-default tonal-lift",
         cfg.border,
         STAGGER[index]
       )}
     >
-      {/* Accent gradient background */}
-      <div className={cn("absolute inset-0 bg-gradient-to-br opacity-60", cfg.accent)} />
+      {/* Subtle accent gradient overlay */}
+      <div className={cn("absolute inset-0 bg-gradient-to-br opacity-50", cfg.accent)} />
 
-      {/* Shine sweep on hover */}
-      <div className="absolute inset-0 opacity-0 group-hover:opacity-100 transition-opacity duration-500 shine rounded-xl" />
+      {/* Left accent notch — appears on hover */}
+      <div className="absolute left-0 top-0 h-full w-0.5 bg-primary opacity-0 group-hover:opacity-100 transition-opacity duration-300" />
 
       <div className="relative p-5">
         <div className="flex items-center justify-between mb-4">
@@ -172,13 +165,13 @@ function ScoreBadge({ score }: { score: number }) {
 function CompanyAvatar({ company }: { company: string }) {
   const letter = company.trim()[0]?.toUpperCase() ?? "?";
   const palettes = [
-    "bg-blue-500/15 text-blue-300 border-blue-500/20",
-    "bg-violet-500/15 text-violet-300 border-violet-500/20",
-    "bg-emerald-500/15 text-emerald-300 border-emerald-500/20",
-    "bg-amber-500/15 text-amber-300 border-amber-500/20",
-    "bg-pink-500/15 text-pink-300 border-pink-500/20",
-    "bg-cyan-500/15 text-cyan-300 border-cyan-500/20",
-    "bg-orange-500/15 text-orange-300 border-orange-500/20",
+    "bg-blue-500/15 text-blue-300 border-blue-500/15",
+    "bg-primary/15 text-primary border-primary/15",
+    "bg-emerald-500/15 text-emerald-300 border-emerald-500/15",
+    "bg-amber-500/15 text-amber-300 border-amber-500/15",
+    "bg-pink-500/15 text-pink-300 border-pink-500/15",
+    "bg-cyan-500/15 text-cyan-300 border-cyan-500/15",
+    "bg-blue-400/15 text-blue-200 border-blue-400/15",
   ];
   const i = ((letter.charCodeAt(0) - 65) % palettes.length + palettes.length) % palettes.length;
   return (
@@ -211,16 +204,16 @@ export default function ApplicationsTab({
 
         {/* ── Mira AI banner ─────────────────────────────────────────── */}
         {apps.length > 0 && (
-          <div className="relative animate-fade-in overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-r from-primary/8 via-primary/4 to-violet-500/4">
-            {/* Animated glow */}
+          <div className="relative animate-fade-in overflow-hidden rounded-xl border border-primary/20 bg-gradient-to-r from-primary/8 via-primary/4 to-transparent">
+            {/* Teal ambient glow */}
             <div className="pointer-events-none absolute inset-0">
               <div
                 className="absolute inset-0 opacity-30 rounded-xl"
-                style={{ background: "linear-gradient(90deg, hsl(252 91% 64% / 0.15), transparent 60%)" }}
+                style={{ background: "linear-gradient(90deg, hsl(167 76% 57% / 0.15), transparent 60%)" }}
               />
             </div>
             <div className="relative flex items-start gap-3.5 px-5 py-4">
-              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-violet-500/20 ring-1 ring-primary/20">
+              <div className="mt-0.5 flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-teal-900/20 ring-1 ring-primary/20">
                 <Sparkles className="h-4 w-4 text-primary" />
               </div>
               <div className="flex-1 min-w-0">
@@ -274,12 +267,12 @@ export default function ApplicationsTab({
               placeholder="Search companies, positions, locations…"
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className="pl-10 bg-white/[0.04] border-white/[0.08] focus:border-primary/50 focus:bg-white/[0.06] placeholder:text-muted-foreground/50 transition-all"
+              className="pl-10 bg-muted/60 border-border focus:border-primary/50 focus:bg-background placeholder:text-muted-foreground/50 transition-all dark:bg-white/[0.04] dark:border-white/[0.08] dark:focus:bg-white/[0.06]"
             />
           </div>
           <Button
             onClick={onAddNew}
-            className="shrink-0 gap-2 bg-gradient-to-r from-primary to-violet-500 hover:from-primary/90 hover:to-violet-500/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold"
+            className="shrink-0 gap-2 bg-gradient-to-r from-primary to-teal-700 hover:from-primary/90 hover:to-teal-700/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold"
           >
             <Plus className="h-4 w-4" />
             Add Application
@@ -287,11 +280,11 @@ export default function ApplicationsTab({
         </div>
 
         {/* ── Table ──────────────────────────────────────────────────── */}
-        <div className="animate-fade-in [animation-delay:250ms] overflow-hidden rounded-xl border border-white/[0.07] glass">
+        <div className="animate-fade-in [animation-delay:250ms] overflow-hidden rounded-xl glass">
           <div className="overflow-x-auto">
             <table className="w-full text-sm">
               <thead>
-                <tr className="border-b border-white/[0.06] bg-white/[0.025]">
+                <tr className="border-b border-border/60 bg-muted/40 dark:border-white/[0.06] dark:bg-white/[0.025]">
                   {["Company", "Position", "Status", "Referral", "Updated", "Applied", "Match", ""].map((h) => (
                     <th
                       key={h}
@@ -316,7 +309,7 @@ export default function ApplicationsTab({
                   <tr>
                     <td colSpan={8} className="py-20 text-center">
                       <div className="flex flex-col items-center gap-3">
-                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-white/[0.07] bg-white/[0.03]">
+                        <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border/50 bg-muted/30 dark:border-white/[0.07] dark:bg-white/[0.03]">
                           <Building2 className="h-7 w-7 text-muted-foreground/30" />
                         </div>
                         <div>
@@ -337,7 +330,7 @@ export default function ApplicationsTab({
                     return (
                       <tr
                         key={app.id}
-                        className="group border-b border-white/[0.04] last:border-0 cursor-pointer transition-colors hover:bg-white/[0.03]"
+                        className="group border-b border-border/40 last:border-0 cursor-pointer transition-colors hover:bg-muted/50 dark:border-white/[0.04] dark:hover:bg-white/[0.03]"
                         onClick={() => onRowClick(app)}
                       >
                         <td className="px-4 py-3.5">
@@ -385,7 +378,7 @@ export default function ApplicationsTab({
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">
                             <Tooltip>
                               <TooltipTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-white/[0.07]" onClick={() => onEdit(app)}>
+                                <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-muted dark:hover:bg-white/[0.07]" onClick={() => onEdit(app)}>
                                   <Edit2 className="h-3.5 w-3.5 text-muted-foreground" />
                                 </Button>
                               </TooltipTrigger>
@@ -394,7 +387,7 @@ export default function ApplicationsTab({
                             {app.jobUrl && (
                               <Tooltip>
                                 <TooltipTrigger asChild>
-                                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-white/[0.07]" asChild>
+                                  <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-muted dark:hover:bg-white/[0.07]" asChild>
                                     <a href={app.jobUrl} target="_blank" rel="noreferrer">
                                       <ExternalLink className="h-3.5 w-3.5 text-muted-foreground" />
                                     </a>
@@ -430,7 +423,7 @@ export default function ApplicationsTab({
           </div>
 
           {sortedApps.length > 0 && (
-            <div className="border-t border-white/[0.04] px-4 py-2.5 bg-white/[0.01]">
+            <div className="border-t border-border/40 px-4 py-2.5 dark:border-white/[0.04]">
               <p className="text-[11px] text-muted-foreground/40 tabular-nums">
                 {sortedApps.length} {sortedApps.length === 1 ? "application" : "applications"}
                 {searchTerm ? " matched" : ""}

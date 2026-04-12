@@ -86,7 +86,7 @@ export default function MatchDialog({
         {/* Header */}
         <DialogHeader className="px-6 pt-6 pb-5 border-b border-white/[0.06] flex-shrink-0">
           <div className="flex items-center gap-3">
-            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-violet-500/20 ring-1 ring-primary/20">
+            <div className="flex h-9 w-9 items-center justify-center rounded-xl bg-gradient-to-br from-primary/30 to-teal-900/20 ring-1 ring-primary/20">
               <Sparkles className="h-4 w-4 text-primary" />
             </div>
             <div>
@@ -151,7 +151,7 @@ export default function MatchDialog({
                 )}
 
                 <Button
-                  className="w-full gap-2 bg-gradient-to-r from-primary to-violet-500 hover:from-primary/90 hover:to-violet-500/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold"
+                  className="w-full gap-2 bg-gradient-to-r from-primary to-teal-700 hover:from-primary/90 hover:to-teal-700/90 text-white border-0 shadow-lg shadow-primary/20 font-semibold"
                   onClick={onRunMatch}
                   disabled={matchLoading || !matchResumeId || parsedResumes.length === 0}
                 >
@@ -176,7 +176,7 @@ export default function MatchDialog({
                   <h4 className="text-[11px] font-bold uppercase tracking-[0.12em] text-muted-foreground/50">Score Breakdown</h4>
                   {[
                     { label: "Required Skills",  val: matchResult.breakdown?.required  ?? 0, max: 50, color: "bg-primary"       },
-                    { label: "Preferred Skills", val: matchResult.breakdown?.preferred ?? 0, max: 30, color: "bg-violet-500"    },
+                    { label: "Preferred Skills", val: matchResult.breakdown?.preferred ?? 0, max: 30, color: "bg-teal-500"      },
                     { label: "Experience",       val: matchResult.breakdown?.experience?? 0, max: 20, color: "bg-emerald-500"   },
                   ].map(({ label, val, max, color }) => (
                     <div key={label} className="space-y-2">
@@ -278,7 +278,7 @@ export default function MatchDialog({
                       <ol className="space-y-2.5">
                         {matchResult.action_steps.map((step, i) => (
                           <li key={i} className="flex gap-3 text-[13px] text-muted-foreground/60">
-                            <span className="flex h-5 w-5 shrink-0 mt-0.5 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-violet-500/15 text-primary text-[10px] font-black">
+                            <span className="flex h-5 w-5 shrink-0 mt-0.5 items-center justify-center rounded-full bg-gradient-to-br from-primary/20 to-teal-900/15 text-primary text-[10px] font-black">
                               {i + 1}
                             </span>
                             {step}

@@ -72,6 +72,18 @@ export default function JobApplicationTracker({ session }: { session: any }) {
   const googleEmail: string = session?.user?.email ?? "";
   const googleAvatarUrl: string | null = session?.user?.user_metadata?.avatar_url ?? null;
 
+  // ── theme ────────────────────────────────────────────────────────────────
+  const [theme, setTheme] = useState<"dark" | "light">(() =>
+    (localStorage.getItem("jt.theme") ?? "light") as "dark" | "light"
+  );
+
+  const toggleTheme = () => {
+    const next = theme === "dark" ? "light" : "dark";
+    setTheme(next);
+    localStorage.setItem("jt.theme", next);
+    document.documentElement.classList.toggle("dark", next === "dark");
+  };
+
   // ── core state ──────────────────────────────────────────────────────────
   const [apps, setApps] = useState<JobApplication[]>([]);
   const [loading, setLoading] = useState(true);
@@ -580,15 +592,15 @@ export default function JobApplicationTracker({ session }: { session: any }) {
 
       {/* Main content */}
       <main className="relative flex-1 overflow-y-auto">
-        {/* Ambient background orbs — subtly shift per tab */}
-        <div className="pointer-events-none fixed inset-0 overflow-hidden" style={{ zIndex: 0 }}>
+        {/* Ambient background orbs — dark mode only */}
+        <div className="pointer-events-none fixed inset-0 overflow-hidden hidden dark:block" style={{ zIndex: 0 }}>
           <div
             className="absolute -top-[15%] right-[10%] h-[500px] w-[500px] rounded-full animate-glow-pulse"
-            style={{ background: "radial-gradient(circle, hsl(252 91% 64% / 0.055) 0%, transparent 70%)" }}
+            style={{ background: "radial-gradient(circle, hsl(167 76% 57% / 0.055) 0%, transparent 70%)" }}
           />
           <div
             className="absolute bottom-[5%] left-[15%] h-[400px] w-[400px] rounded-full animate-glow-pulse [animation-delay:2s]"
-            style={{ background: "radial-gradient(circle, hsl(280 90% 65% / 0.04) 0%, transparent 70%)" }}
+            style={{ background: "radial-gradient(circle, hsl(167 76% 57% / 0.035) 0%, transparent 70%)" }}
           />
         </div>
 
@@ -602,7 +614,7 @@ export default function JobApplicationTracker({ session }: { session: any }) {
                   : "Applications"
               )}
               {activeTab === "files" && "Resume Vault"}
-              {activeTab === "analytics" && <>Analytics <span className="gradient-text">Dashboard</span></>}
+              {activeTab === "analytics" && <>Analytics <span className="gradient-text">Insights</span></>}
               {activeTab === "profile" && "Your Profile"}
             </h1>
             <p className="text-[13px] text-muted-foreground/60 mt-1.5">
@@ -661,6 +673,8 @@ export default function JobApplicationTracker({ session }: { session: any }) {
               onLogout={handleLogout}
               onExportCsv={exportCsv}
               onDeleteAccount={handleDeleteAccount}
+              theme={theme}
+              onThemeToggle={toggleTheme}
             />
           )}
         </div>

@@ -5,7 +5,9 @@ export default {
   theme: {
     extend: {
       fontFamily: {
-        sans: ["Inter", "system-ui", "-apple-system", "sans-serif"],
+        sans: ["Manrope", "Inter", "system-ui", "-apple-system", "sans-serif"],
+        headline: ["Manrope", "sans-serif"],
+        label: ["Inter", "sans-serif"],
       },
       colors: {
         border: "hsl(var(--border))",

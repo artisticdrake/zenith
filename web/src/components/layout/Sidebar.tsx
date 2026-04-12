@@ -32,16 +32,21 @@ export default function Sidebar({
 
   return (
     <TooltipProvider delayDuration={0}>
-      <aside className="flex h-screen w-[220px] flex-col border-r border-sidebar-border bg-sidebar">
+      <aside className="flex h-screen w-[220px] flex-col bg-sidebar/90 backdrop-blur-xl border-r border-border">
 
         {/* ── Logo ───────────────────────────────────────────────────── */}
-        <div className="flex h-[60px] items-center gap-2.5 px-4 border-b border-sidebar-border">
-          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-gradient-to-br from-primary to-violet-500 shadow-lg shadow-primary/25">
-            <Briefcase className="h-4 w-4 text-white" />
+        <div className="flex h-[60px] items-center gap-2.5 px-4 border-b border-border">
+          <div className="flex h-8 w-8 shrink-0 items-center justify-center rounded-xl bg-primary shadow-md shadow-primary/20">
+            <Briefcase className="h-4 w-4 text-primary-foreground" />
           </div>
-          <span className="font-bold text-[14px] tracking-tight text-sidebar-foreground">
-            Job Tracker
-          </span>
+          <div>
+            <span className="font-bold text-[14px] tracking-tight text-foreground font-headline">
+              Job Tracker
+            </span>
+            <p className="text-[9px] uppercase tracking-[0.18em] text-muted-foreground font-label leading-tight">
+              Executive Portal
+            </p>
+          </div>
         </div>
 
         {/* ── Nav ────────────────────────────────────────────────────── */}
@@ -54,33 +59,35 @@ export default function Sidebar({
                   <button
                     onClick={() => onTabChange(id)}
                     className={cn(
-                      "relative w-full flex items-center gap-3 rounded-lg px-3 py-2.5 text-[13px] font-medium transition-all duration-150",
+                      "relative w-full flex items-center gap-3 px-3 py-2.5 text-[13px] font-medium transition-all duration-150 rounded-lg",
                       isActive
-                        ? "bg-white/[0.07] text-foreground"
-                        : "text-muted-foreground hover:bg-white/[0.04] hover:text-sidebar-foreground"
+                        ? "bg-primary text-primary-foreground shadow-sm dark:bg-primary/[0.08] dark:text-primary dark:shadow-none"
+                        : "text-muted-foreground hover:bg-muted hover:text-foreground dark:hover:bg-white/[0.04] dark:hover:text-foreground"
                     )}
                   >
-                    {/* Active left bar */}
+                    {/* Accent notch — dark mode only */}
                     {isActive && (
-                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-[18px] w-0.5 rounded-r-full bg-primary" />
+                      <span className="absolute left-0 top-1/2 -translate-y-1/2 h-[18px] w-0.5 rounded-r-full hidden dark:block dark:bg-primary" />
                     )}
 
-                    {/* Icon wrapper */}
                     <span className={cn(
                       "flex h-6 w-6 items-center justify-center rounded-md transition-colors",
-                      isActive ? "bg-primary/20" : "bg-transparent"
+                      isActive ? "bg-white/20 dark:bg-primary/15" : "bg-transparent"
                     )}>
-                      <Icon className={cn("h-3.5 w-3.5", isActive ? "text-primary" : "")} />
+                      <Icon className={cn(
+                        "h-3.5 w-3.5",
+                        isActive ? "text-primary-foreground dark:text-primary" : ""
+                      )} />
                     </span>
 
-                    <span>{label}</span>
+                    <span className="font-label">{label}</span>
 
                     {id === "applications" && appCount > 0 && (
                       <span className={cn(
-                        "ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums",
+                        "ml-auto rounded-full px-1.5 py-0.5 text-[10px] font-bold tabular-nums font-label",
                         isActive
-                          ? "bg-primary/20 text-primary"
-                          : "bg-white/[0.06] text-muted-foreground"
+                          ? "bg-white/25 text-primary-foreground dark:bg-primary/20 dark:text-primary"
+                          : "bg-muted-foreground/10 text-muted-foreground dark:bg-white/[0.06]"
                       )}>
                         {appCount}
                       </span>
@@ -94,19 +101,19 @@ export default function Sidebar({
         </nav>
 
         {/* ── User footer ────────────────────────────────────────────── */}
-        <div className="border-t border-sidebar-border p-2">
-          <div className="group flex items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-white/[0.05] cursor-default">
-            <Avatar className="h-7 w-7 shrink-0 ring-1 ring-white/10">
+        <div className="border-t border-border p-2">
+          <div className="group flex items-center gap-2.5 rounded-lg px-2.5 py-2 transition-colors hover:bg-muted dark:hover:bg-white/[0.04] cursor-default">
+            <Avatar className="h-7 w-7 shrink-0 ring-1 ring-border">
               {googleAvatarUrl && <AvatarImage src={googleAvatarUrl} alt={displayName} />}
-              <AvatarFallback className="text-[10px] font-bold bg-gradient-to-br from-primary/30 to-violet-500/20 text-primary">
+              <AvatarFallback className="text-[10px] font-bold bg-primary/10 text-primary dark:bg-primary/20">
                 {initials}
               </AvatarFallback>
             </Avatar>
             <div className="flex-1 min-w-0">
-              <p className="text-[12px] font-semibold text-sidebar-foreground truncate leading-tight">
+              <p className="text-[12px] font-semibold text-foreground truncate leading-tight">
                 {displayName || "User"}
               </p>
-              <p className="text-[10px] text-muted-foreground truncate">{googleEmail}</p>
+              <p className="text-[10px] text-muted-foreground truncate font-label">{googleEmail}</p>
             </div>
             <Tooltip>
               <TooltipTrigger asChild>

@@ -1,5 +1,5 @@
 import { useState } from "react";
-import { Pencil, Mail, Shield, Download, Trash2, LogOut, Check, X, Database, CalendarDays } from "lucide-react";
+import { Pencil, Mail, Shield, Download, Trash2, LogOut, Check, X, Database, CalendarDays, Sun, Moon } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { Input } from "@/components/ui/input";
 import { Badge } from "@/components/ui/badge";
@@ -19,6 +19,8 @@ interface ProfileTabProps {
   onLogout: () => void;
   onExportCsv: () => void;
   onDeleteAccount: () => void;
+  theme: "dark" | "light";
+  onThemeToggle: () => void;
 }
 
 function StatNumber({ value, label }: { value: number; label: string }) {
@@ -33,7 +35,7 @@ function StatNumber({ value, label }: { value: number; label: string }) {
 
 export default function ProfileTab({
   displayName, googleEmail, googleAvatarUrl, joinedAt, appCount,
-  onSaveName, onLogout, onExportCsv, onDeleteAccount,
+  onSaveName, onLogout, onExportCsv, onDeleteAccount, theme, onThemeToggle,
 }: ProfileTabProps) {
   const [editing, setEditing] = useState(false);
   const [nameInput, setNameInput] = useState(displayName);
@@ -57,10 +59,10 @@ export default function ProfileTab({
       <div className="overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up stagger-1">
         {/* Gradient banner */}
         <div className="relative h-24 overflow-hidden">
-          <div className="absolute inset-0 bg-gradient-to-br from-primary/25 via-violet-500/15 to-transparent" />
+          <div className="absolute inset-0 bg-gradient-to-br from-primary/20 via-teal-900/10 to-transparent" />
           <div
             className="absolute inset-0"
-            style={{ background: "radial-gradient(ellipse at 30% 50%, hsl(252 91% 64% / 0.2) 0%, transparent 70%)" }}
+            style={{ background: "radial-gradient(ellipse at 30% 50%, hsl(167 76% 57% / 0.18) 0%, transparent 70%)" }}
           />
           {/* Subtle grid */}
           <div
@@ -76,7 +78,7 @@ export default function ProfileTab({
           <div className="flex items-end gap-4 mb-5">
             <Avatar className="h-20 w-20 shrink-0 ring-4 ring-background shadow-2xl">
               {googleAvatarUrl && <AvatarImage src={googleAvatarUrl} />}
-              <AvatarFallback className="text-xl font-black bg-gradient-to-br from-primary/40 to-violet-500/30 text-primary">
+              <AvatarFallback className="text-xl font-black bg-gradient-to-br from-primary/30 to-teal-900/40 text-primary">
                 {initials}
               </AvatarFallback>
             </Avatar>
@@ -129,8 +131,47 @@ export default function ProfileTab({
         </div>
       </div>
 
-      {/* ── Account Settings ───────────────────────────────────────── */}
+      {/* ── Appearance ─────────────────────────────────────────────── */}
       <div className="overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up stagger-2">
+        <div className="px-5 py-4">
+          <h3 className="text-[13px] font-bold text-foreground/80 mb-4">Appearance</h3>
+          <div className="flex items-center justify-between">
+            <div className="flex items-center gap-3">
+              <span className={cn(
+                "flex h-7 w-7 items-center justify-center rounded-lg",
+                theme === "light" ? "bg-amber-500/15" : "bg-primary/15"
+              )}>
+                {theme === "light"
+                  ? <Sun className="h-3.5 w-3.5 text-amber-400" />
+                  : <Moon className="h-3.5 w-3.5 text-primary" />
+                }
+              </span>
+              <div>
+                <p className="text-[13px] text-foreground/80">{theme === "light" ? "Light Mode" : "Dark Mode"}</p>
+                <p className="text-[11px] text-muted-foreground/50">Saved automatically</p>
+              </div>
+            </div>
+            <button
+              onClick={onThemeToggle}
+              className={cn(
+                "relative inline-flex h-6 w-11 items-center rounded-full transition-colors duration-300 focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring",
+                theme === "light" ? "bg-amber-400/70" : "bg-primary/50"
+              )}
+              role="switch"
+              aria-checked={theme === "light"}
+              aria-label="Toggle theme"
+            >
+              <span className={cn(
+                "inline-block h-4 w-4 transform rounded-full bg-white shadow-sm transition-transform duration-300",
+                theme === "light" ? "translate-x-6" : "translate-x-1"
+              )} />
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── Account Settings ───────────────────────────────────────── */}
+      <div className="overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up stagger-3">
         <div className="px-5 pt-5 pb-1">
           <h3 className="text-[13px] font-bold text-foreground/80">Account Settings</h3>
         </div>
@@ -169,7 +210,7 @@ export default function ProfileTab({
       </div>
 
       {/* ── Data Backup ────────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up stagger-3 px-5 py-5">
+      <div className="overflow-hidden rounded-xl border border-white/[0.07] glass animate-slide-up stagger-4 px-5 py-5">
         <div className="flex items-center justify-between">
           <div>
             <h3 className="text-[13px] font-bold text-foreground/80">Data Backup</h3>
@@ -183,7 +224,7 @@ export default function ProfileTab({
       </div>
 
       {/* ── Danger Zone ────────────────────────────────────────────── */}
-      <div className="overflow-hidden rounded-xl border border-destructive/20 bg-destructive/[0.03] animate-slide-up stagger-4 px-5 py-5">
+      <div className="overflow-hidden rounded-xl border border-destructive/20 bg-destructive/[0.03] animate-slide-up stagger-5 px-5 py-5">
         <h3 className="text-[13px] font-bold text-destructive mb-0.5">Danger Zone</h3>
         <p className="text-[12px] text-muted-foreground/50 mb-4">
           Permanently delete your account, applications, and all resumes. Cannot be undone.
