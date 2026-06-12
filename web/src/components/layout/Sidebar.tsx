@@ -1,10 +1,10 @@
-import { LayoutDashboard, Files, BarChart3, User, LogOut, Briefcase } from "lucide-react";
+import { LayoutDashboard, BookOpen, BarChart3, User, LogOut, Briefcase, FileText, Wand2 } from "lucide-react";
 import { cn } from "@/lib/utils";
 import { Avatar, AvatarFallback, AvatarImage } from "@/components/ui/avatar";
 import { Button } from "@/components/ui/button";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "@/components/ui/tooltip";
 
-export type TabId = "applications" | "files" | "analytics" | "profile";
+export type TabId = "applications" | "master-info" | "analytics" | "profile" | "resume-builder" | "tailor";
 
 interface SidebarProps {
   activeTab: TabId;
@@ -17,10 +17,12 @@ interface SidebarProps {
 }
 
 const NAV_ITEMS: { id: TabId; label: string; icon: React.FC<{ className?: string }> }[] = [
-  { id: "applications", label: "Applications", icon: ({ className }) => <LayoutDashboard className={className} /> },
-  { id: "files",        label: "Files",         icon: ({ className }) => <Files className={className} />         },
-  { id: "analytics",   label: "Analytics",     icon: ({ className }) => <BarChart3 className={className} />     },
-  { id: "profile",     label: "Profile",       icon: ({ className }) => <User className={className} />          },
+  { id: "applications",    label: "Applications",   icon: ({ className }) => <LayoutDashboard className={className} /> },
+  { id: "master-info",     label: "Master Info",    icon: ({ className }) => <BookOpen className={className} />     },
+  { id: "analytics",      label: "Analytics",      icon: ({ className }) => <BarChart3 className={className} />      },
+  { id: "resume-builder", label: "Resume Builder", icon: ({ className }) => <FileText className={className} />       },
+  { id: "tailor",         label: "Tailor",         icon: ({ className }) => <Wand2 className={className} />          },
+  { id: "profile",        label: "Profile",        icon: ({ className }) => <User className={className} />           },
 ];
 
 export default function Sidebar({

@@ -5,6 +5,7 @@ export type AppStatus =
   | "Interview Completed"
   | "Offer"
   | "Rejected"
+  | "Ghosted"
   | "Withdrawn";
 
 export type AppSource =
@@ -44,16 +45,6 @@ export interface JobApplication {
   last_updated: string;
 }
 
-export interface Resume {
-  id: string;
-  file_name: string;
-  file_type: string;
-  file_size: number;
-  uploaded_at: string;
-  extracted_text: string;
-  is_active: boolean;
-}
-
 export interface AppFormData {
   company: string;
   position: string;
@@ -67,20 +58,4 @@ export interface AppFormData {
   notes: string;
   jobDescription: string;
   documents: Document[];
-}
-
-export interface MatchResult {
-  score: number;
-  label: string;
-  breakdown: {
-    required: number;
-    preferred: number;
-    experience: number;
-  };
-  summary: string;
-  matched_skills: string[];
-  missing_skills: string[];
-  observations: string[];
-  suggested_rewrites: Array<{ original: string; rewrite: string }>;
-  action_steps: string[];
 }

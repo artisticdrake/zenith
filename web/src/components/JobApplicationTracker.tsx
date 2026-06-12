@@ -2,17 +2,18 @@ import { useEffect, useMemo, useRef, useState } from "react";
 import { supabase } from "@/lib/supabase";
 import { todayISO, startOfWeekISO } from "@/lib/dateUtils";
 import { STATUSES, SOURCES } from "@/lib/constants";
-import type { JobApplication, AppFormData, Resume, MatchResult } from "@/lib/types";
+import type { JobApplication, AppFormData } from "@/lib/types";
 
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import ApplicationsTab from "@/components/tabs/ApplicationsTab";
-import FilesTab from "@/components/tabs/FilesTab";
+import MasterInfoTab from "@/components/tabs/MasterInfoTab";
 import AnalyticsTab from "@/components/tabs/AnalyticsTab";
 import ProfileTab from "@/components/tabs/ProfileTab";
+import TailorTab from "@/components/tabs/TailorTab";
+import ResumeBuilder from "@/pages/ResumeBuilder";
 import AppFormModal from "@/components/modals/AppFormModal";
 import AppDetailModal from "@/components/modals/AppDetailModal";
 import DeleteConfirmDialog from "@/components/modals/DeleteConfirmDialog";
-import MatchDialog from "@/components/modals/MatchDialog";
 
 // ── helpers ────────────────────────────────────────────────────────────────
 
@@ -37,7 +38,7 @@ function median(values: number[]) {
 }
 
 function calcResponseRate(apps: JobApplication[]) {
-  const responded = apps.filter((a) => !["Applied", "Withdrawn"].includes(a.status)).length;
+  const responded = apps.filter((a) => !["Applied", "Ghosted", "Withdrawn"].includes(a.status)).length;
   return apps.length > 0 ? ((responded / apps.length) * 100).toFixed(1) : 0;
 }
 
@@ -123,20 +124,14 @@ export default function JobApplicationTracker({ session }: { session: any }) {
   const [aiSummary, setAiSummary] = useState("");
   const [loadingSummary, setLoadingSummary] = useState(false);
 
-  // ── resumes ─────────────────────────────────────────────────────────────
-  const [resumes, setResumes] = useState<Resume[]>([]);
-  const [resumesLoading, setResumesLoading] = useState(false);
-  const [resumeUploading, setResumeUploading] = useState(false);
-  const [resumeError, setResumeError] = useState<string | null>(null);
-  const [resumeParseStatus, setResumeParseStatus] = useState<Record<string, "idle" | "parsing" | "done" | "error">>({});
+  // vault resumes removed — Master Profile is the single source of truth
 
-  // ── match ────────────────────────────────────────────────────────────────
-  const [matchDialogApp, setMatchDialogApp] = useState<JobApplication | null>(null);
-  const [matchResumeId, setMatchResumeId] = useState("");
-  const [matchLoading, setMatchLoading] = useState(false);
-  const [matchResult, setMatchResult] = useState<MatchResult | null>(null);
-  const [matchError, setMatchError] = useState<string | null>(null);
+  // ── score badges (cached Claude tailor scores) ───────────────────────────
   const [appScores, setAppScores] = useState<Record<string, number>>({});
+
+  // ── auto-ghost ──────────────────────────────────────────────────────────
+  const [ghostNotice, setGhostNotice] = useState<number>(0);
+  const autoGhostRanRef = useRef(false);
 
   const API = import.meta.env.VITE_API_URL;
   const token = () => session?.access_token ?? "";
@@ -203,6 +198,23 @@ export default function JobApplicationTracker({ session }: { session: any }) {
     [stats.sourceCounts]
   );
 
+  const monthData = useMemo(() => {
+    const map: Record<string, number> = {};
+    apps.forEach((a) => {
+      if (!a.dateApplied) return;
+      const d = new Date(a.dateApplied + "T00:00:00");
+      const key = `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+      map[key] = (map[key] || 0) + 1;
+    });
+    return Object.entries(map)
+      .sort((a, b) => a[0].localeCompare(b[0]))
+      .map(([key, count]) => {
+        const [yr, mo] = key.split("-");
+        const label = new Date(parseInt(yr), parseInt(mo) - 1).toLocaleString("default", { month: "short" });
+        return { month: `${label} '${yr.slice(2)}`, count };
+      });
+  }, [apps]);
+
   // ── autofill suggestions ──────────────────────────────────────────────────
   useEffect(() => {
     setCompanySuggestions([...new Set(apps.map((a) => a.company).filter(Boolean))]);
@@ -236,7 +248,7 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         });
       });
       setApps(mapped);
-      loadCachedScores(mapped);
+      loadCachedScores();
     } catch (err: any) {
       console.error(err);
       setApps([]);
@@ -271,31 +283,18 @@ export default function JobApplicationTracker({ session }: { session: any }) {
     } catch { setNameInput(googleName); setShowNameModal(true); }
   };
 
-  const fetchResumes = async () => {
-    if (!session?.access_token) return;
-    setResumesLoading(true);
-    try {
-      const res = await fetch(`${API}/resumes`, { headers: { Authorization: `Bearer ${token()}` } });
-      const data = await res.json();
-      if (data.success) setResumes(data.data || []);
-    } catch (err) { console.error(err); }
-    finally { setResumesLoading(false); }
-  };
 
-  const loadCachedScores = async (appList: JobApplication[]) => {
-    const scores: Record<string, number> = {};
-    await Promise.all(
-      appList.map(async (app) => {
-        try {
-          const res = await fetch(`${API}/match/${app.id}`, { headers: { Authorization: `Bearer ${token()}` } });
-          if (res.ok) {
-            const d = await res.json();
-            if (d.success && d.data?.score != null) scores[app.id] = d.data.score;
-          }
-        } catch {}
-      })
-    );
-    setAppScores(scores);
+  // One batch request: stored Claude scores for every application that has a
+  // tailor run matching its JD. No per-app round-trips, no recomputation.
+  const loadCachedScores = async () => {
+    try {
+      const res = await fetch(`${API}/scores/claude`, {
+        headers: { Authorization: `Bearer ${token()}` },
+      });
+      if (!res.ok) return;
+      const d = await res.json();
+      if (d.success && d.scores) setAppScores(d.scores);
+    } catch {}
   };
 
   useEffect(() => {
@@ -304,6 +303,27 @@ export default function JobApplicationTracker({ session }: { session: any }) {
 
   useEffect(() => {
     if (apps.length > 0 && !aiSummary && !loadingSummary) generateAiSummary();
+  }, [apps]);
+
+  // Run once per session after apps first load — marks stale apps as Ghosted
+  const runAutoGhost = async () => {
+    if (!session?.access_token || autoGhostRanRef.current) return;
+    autoGhostRanRef.current = true;
+    try {
+      const res = await fetch(`${API}/applications/auto-ghost`, {
+        method: "POST",
+        headers: { Authorization: `Bearer ${token()}` },
+      });
+      const data = await res.json();
+      if (data.success && data.ghosted > 0) {
+        setGhostNotice(data.ghosted);
+        await fetchApps(); // refresh list to show updated statuses
+      }
+    } catch {}
+  };
+
+  useEffect(() => {
+    if (apps.length > 0 && !autoGhostRanRef.current) runAutoGhost();
   }, [apps]);
 
   // ── actions ──────────────────────────────────────────────────────────────
@@ -423,91 +443,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
     finally { setAutofillLoading(false); }
   };
 
-  const handleResumeUpload = async (file: File) => {
-    setResumeError(null);
-    const allowed = ["application/pdf", "application/msword", "application/vnd.openxmlformats-officedocument.wordprocessingml.document"];
-    if (!allowed.includes(file.type)) { setResumeError("Only PDF, DOC, and DOCX files are accepted."); return; }
-    if (resumes.length >= 3) { setResumeError("You've reached the 3-resume limit. Delete one to upload a new one."); return; }
-    setResumeUploading(true);
-    const reader = new FileReader();
-    reader.onload = async (e) => {
-      const base64 = (e.target?.result as string).split(",")[1];
-      const res = await fetch(`${API}/resumes`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
-        body: JSON.stringify({ fileName: file.name, fileType: file.type, fileData: base64, fileSize: file.size }),
-      });
-      const data = await res.json();
-      if (data.success) {
-        await fetchResumes();
-        await handleResumeParse(data.data.id);
-        await fetchResumes();
-      } else { setResumeError(data.error || "Upload failed."); }
-      setResumeUploading(false);
-    };
-    reader.readAsDataURL(file);
-  };
-
-  const handleResumeDelete = async (id: string) => {
-    const res = await fetch(`${API}/resumes/${id}`, { method: "DELETE", headers: { Authorization: `Bearer ${token()}` } });
-    const data = await res.json();
-    if (data.success) setResumes((p) => p.filter((r) => r.id !== id));
-    else setResumeError(data.error || "Delete failed.");
-  };
-
-  const handleResumeDownload = async (id: string) => {
-    const res = await fetch(`${API}/resumes/${id}/download`, { headers: { Authorization: `Bearer ${token()}` } });
-    const data = await res.json();
-    if (data.success) {
-      const a = document.createElement("a");
-      a.href = data.url; a.download = data.fileName; a.target = "_blank"; a.click();
-    } else setResumeError(data.error || "Download failed.");
-  };
-
-  const handleResumeParse = async (id: string) => {
-    setResumeParseStatus((p) => ({ ...p, [id]: "parsing" }));
-    const res = await fetch(`${API}/resumes/${id}/parse`, { method: "POST", headers: { Authorization: `Bearer ${token()}` } });
-    const data = await res.json();
-    setResumeParseStatus((p) => ({ ...p, [id]: data.success ? "done" : "error" }));
-    if (!data.success) setResumeError(data.error || "Parse failed.");
-  };
-
-  const openMatchDialog = async (app: JobApplication) => {
-    setMatchDialogApp(app);
-    setMatchResult(null);
-    setMatchError(null);
-    if (resumes.length === 0) await fetchResumes();
-    try {
-      const res = await fetch(`${API}/match/${app.id}`, { headers: { Authorization: `Bearer ${token()}` } });
-      if (res.ok) {
-        const d = await res.json();
-        if (d.success && d.data) { setMatchResult(d.data); setAppScores((p) => ({ ...p, [app.id]: d.data.score })); }
-      }
-    } catch {}
-  };
-
-  const runMatch = async () => {
-    if (!matchDialogApp) return;
-    const parsedResumes = resumes.filter((r) => r.extracted_text);
-    const activeResume = parsedResumes.find((r) => r.is_active) || parsedResumes[0];
-    const selectedResume = resumes.find((r) => r.id === matchResumeId) || activeResume;
-    if (!selectedResume) { setMatchError("No parsed resume found. Upload a resume in the Files tab first."); return; }
-    setMatchLoading(true);
-    setMatchError(null);
-    setMatchResult(null);
-    try {
-      const res = await fetch(`${API}/match`, {
-        method: "POST",
-        headers: { "Content-Type": "application/json", Authorization: `Bearer ${token()}` },
-        body: JSON.stringify({ applicationId: matchDialogApp.id, resumeId: selectedResume.id }),
-      });
-      const d = await res.json();
-      if (!d.success) throw new Error(d.error || "Match failed");
-      setMatchResult(d.data);
-      setAppScores((p) => ({ ...p, [matchDialogApp.id]: d.data.score }));
-    } catch (err: any) { setMatchError(err.message); }
-    finally { setMatchLoading(false); }
-  };
 
   const saveProfileName = async (name: string) => {
     setDisplayName(name);
@@ -581,7 +516,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         activeTab={activeTab}
         onTabChange={(tab) => {
           setActiveTab(tab);
-          if (tab === "files") fetchResumes();
         }}
         onLogout={handleLogout}
         displayName={displayName}
@@ -591,7 +525,32 @@ export default function JobApplicationTracker({ session }: { session: any }) {
       />
 
       {/* Main content */}
-      <main className="relative flex-1 overflow-y-auto">
+      <main className="relative flex-1 overflow-hidden flex flex-col">
+        {/* Resume Builder — full-height, no padding wrapper */}
+        {activeTab === "resume-builder" && (
+          <div className="flex-1 overflow-hidden">
+            <ResumeBuilder session={session} />
+          </div>
+        )}
+
+        {/* Master Info — always mounted so state survives resume-builder tab switches */}
+        <div className={activeTab === "master-info" ? "flex-1 overflow-y-auto" : "hidden"}>
+          <div className="relative z-10 max-w-7xl mx-auto px-7 py-8">
+            <div className="mb-8">
+              <h1 className="text-[28px] font-black tracking-tight leading-tight">
+                Master <span className="gradient-text">Information</span>
+              </h1>
+              <p className="text-[13px] text-muted-foreground/60 mt-1.5">
+                Your comprehensive content library — the single source of truth for all tailored resumes
+              </p>
+            </div>
+            <MasterInfoTab session={session} />
+          </div>
+        </div>
+
+        {/* All other tabs */}
+        {activeTab !== "resume-builder" && activeTab !== "master-info" && (
+        <div className="flex-1 overflow-y-auto">
         {/* Ambient background orbs — dark mode only */}
         <div className="pointer-events-none fixed inset-0 overflow-hidden hidden dark:block" style={{ zIndex: 0 }}>
           <div
@@ -605,6 +564,23 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         </div>
 
         <div className="relative z-10 max-w-7xl mx-auto px-7 py-8">
+          {/* Auto-ghost notice */}
+          {ghostNotice > 0 && (
+            <div className="mb-6 flex items-center gap-3 rounded-lg border border-zinc-500/20 bg-zinc-500/10 px-4 py-3 text-sm text-zinc-300 animate-slide-up">
+              <span className="text-base shrink-0">👻</span>
+              <span>
+                <span className="font-semibold">{ghostNotice} application{ghostNotice > 1 ? "s" : ""}</span>
+                {" "}moved to <span className="font-semibold">Ghosted</span> — no activity for 90+ days.
+              </span>
+              <button
+                className="ml-auto shrink-0 text-zinc-500 hover:text-zinc-300 transition-colors text-lg leading-none"
+                onClick={() => setGhostNotice(0)}
+              >
+                ×
+              </button>
+            </div>
+          )}
+
           {/* Page header */}
           <div className="mb-8">
             <h1 className="text-[28px] font-black tracking-tight leading-tight">
@@ -613,15 +589,15 @@ export default function JobApplicationTracker({ session }: { session: any }) {
                   ? <>Welcome back, <span className="gradient-text">{displayName.split(" ")[0]}</span> 👋</>
                   : "Applications"
               )}
-              {activeTab === "files" && "Resume Vault"}
               {activeTab === "analytics" && <>Analytics <span className="gradient-text">Insights</span></>}
               {activeTab === "profile" && "Your Profile"}
+              {activeTab === "tailor" && <>Resume <span className="gradient-text">Tailor</span></>}
             </h1>
             <p className="text-[13px] text-muted-foreground/60 mt-1.5">
               {activeTab === "applications" && `${apps.length} application${apps.length !== 1 ? "s" : ""} tracked`}
-              {activeTab === "files" && "Upload resumes and match them against job descriptions with AI"}
               {activeTab === "analytics" && "Performance insights across your entire job search"}
               {activeTab === "profile" && "Manage your account, data, and preferences"}
+              {activeTab === "tailor" && "Paste a job description — Zenith assembles your best one-page resume from your content library"}
             </p>
           </div>
 
@@ -637,7 +613,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
               onEdit={handleEdit}
               onDelete={handleDelete}
               onRowClick={setExpandedApp}
-              onMatch={openMatchDialog}
               appScores={appScores}
               aiSummary={aiSummary}
               loadingSummary={loadingSummary}
@@ -645,21 +620,8 @@ export default function JobApplicationTracker({ session }: { session: any }) {
             />
           )}
 
-          {activeTab === "files" && (
-            <FilesTab
-              resumes={resumes}
-              resumesLoading={resumesLoading}
-              resumeUploading={resumeUploading}
-              resumeError={resumeError}
-              resumeParseStatus={resumeParseStatus}
-              onUpload={handleResumeUpload}
-              onDelete={handleResumeDelete}
-              onDownload={handleResumeDownload}
-            />
-          )}
-
           {activeTab === "analytics" && (
-            <AnalyticsTab stats={stats} pieData={pieData} sourceData={sourceData} />
+            <AnalyticsTab stats={stats} pieData={pieData} sourceData={sourceData} monthData={monthData} />
           )}
 
           {activeTab === "profile" && (
@@ -677,7 +639,21 @@ export default function JobApplicationTracker({ session }: { session: any }) {
               onThemeToggle={toggleTheme}
             />
           )}
+
+          {activeTab === "tailor" && (
+            <TailorTab
+              apps={apps}
+              session={session}
+              onOpenInBuilder={(_content, _company, _role) => {
+                // Content was already written to localStorage by TailorTab before this call.
+                // useResumeData.fetchVersions reads it atomically on next mount.
+                setActiveTab("resume-builder");
+              }}
+            />
+          )}
         </div>
+        </div>
+        )}
       </main>
 
       {/* Modals */}
@@ -707,19 +683,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         open={!!deleteConfirmId}
         onClose={() => setDeleteConfirmId(null)}
         onConfirm={confirmDelete}
-      />
-
-      <MatchDialog
-        app={matchDialogApp}
-        onClose={() => { setMatchDialogApp(null); setMatchResult(null); setMatchError(null); }}
-        resumes={resumes}
-        matchResumeId={matchResumeId}
-        setMatchResumeId={setMatchResumeId}
-        matchLoading={matchLoading}
-        matchResult={matchResult}
-        matchError={matchError}
-        onRunMatch={runMatch}
-        onReset={() => { setMatchResult(null); setMatchError(null); }}
       />
     </div>
   );

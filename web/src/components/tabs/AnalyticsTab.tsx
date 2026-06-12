@@ -1,7 +1,7 @@
 import {
   ResponsiveContainer, PieChart, Pie, Cell, Tooltip,
   AreaChart, Area, XAxis, YAxis, CartesianGrid,
-  BarChart, Bar,
+  BarChart, Bar, LabelList, ReferenceLine,
 } from "recharts";
 import { Card, CardContent, CardHeader, CardTitle } from "@/components/ui/card";
 import { TrendingUp, Clock, Users, Award, Target, DollarSign } from "lucide-react";
@@ -43,6 +43,7 @@ interface AnalyticsTabProps {
   stats: AnalyticsStats;
   pieData: { name: string; value: unknown }[];
   sourceData: { name: string; value: unknown }[];
+  monthData: { month: string; count: number }[];
 }
 
 /* ── Metric config ───────────────────────────────────────────────────────── */
@@ -121,8 +122,92 @@ function ChartCard({ title, children, delay = "" }: { title: string; children: R
   );
 }
 
+/* ── Monthly bar chart ───────────────────────────────────────────────────── */
+function MonthlyChart({ data }: { data: { month: string; count: number }[] }) {
+  const maxCount = Math.max(...data.map((d) => d.count), 1);
+  const avg = data.reduce((s, d) => s + d.count, 0) / (data.length || 1);
+
+  return (
+    <div className="h-64">
+      <ResponsiveContainer width="100%" height="100%">
+        <BarChart data={data} margin={{ top: 24, right: 8, bottom: 0, left: -20 }} barCategoryGap="36%">
+          <defs>
+            {/* normal bar gradient */}
+            <linearGradient id="mbarNorm" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%"   stopColor="#41e4c0" stopOpacity={0.85} />
+              <stop offset="100%" stopColor="#41e4c0" stopOpacity={0.25} />
+            </linearGradient>
+            {/* peak bar gradient — brighter, near-white top */}
+            <linearGradient id="mbarPeak" x1="0" y1="0" x2="0" y2="1">
+              <stop offset="0%"   stopColor="#ffffff" stopOpacity={0.95} />
+              <stop offset="25%"  stopColor="#5ffbd6" stopOpacity={1}    />
+              <stop offset="100%" stopColor="#41e4c0" stopOpacity={0.55} />
+            </linearGradient>
+            {/* subtle glow filter for peak bar */}
+            <filter id="peakGlow" x="-20%" y="-20%" width="140%" height="140%">
+              <feGaussianBlur stdDeviation="3" result="blur" />
+              <feMerge><feMergeNode in="blur" /><feMergeNode in="SourceGraphic" /></feMerge>
+            </filter>
+          </defs>
+
+          <CartesianGrid strokeDasharray="2 4" stroke="rgba(255,255,255,0.04)" vertical={false} />
+
+          <XAxis
+            dataKey="month"
+            tick={{ fontSize: 11, fill: "#64748b" }}
+            tickLine={false}
+            axisLine={false}
+          />
+          <YAxis
+            tick={{ fontSize: 11, fill: "#64748b" }}
+            tickLine={false}
+            axisLine={false}
+            allowDecimals={false}
+          />
+
+          {/* average reference line */}
+          <ReferenceLine
+            y={avg}
+            stroke="rgba(255,255,255,0.10)"
+            strokeDasharray="4 4"
+            label={{
+              value: `avg ${avg.toFixed(1)}`,
+              position: "insideTopRight",
+              fontSize: 10,
+              fill: "rgba(255,255,255,0.25)",
+              fontWeight: 600,
+            }}
+          />
+
+          <Tooltip
+            contentStyle={TOOLTIP_STYLE}
+            cursor={false}
+            formatter={(v: number) => [v, "Applications"]}
+            labelStyle={{ color: "#41e4c0", fontWeight: 700, marginBottom: 2 }}
+          />
+
+          <Bar dataKey="count" radius={[6, 6, 0, 0]} maxBarSize={56} isAnimationActive={false} activeBar={false}>
+            <LabelList
+              dataKey="count"
+              position="top"
+              style={{ fontSize: 10, fill: "#64748b", fontWeight: 700 }}
+            />
+            {data.map((entry, i) => (
+              <Cell
+                key={i}
+                fill={entry.count === maxCount ? "url(#mbarPeak)" : "url(#mbarNorm)"}
+                filter={entry.count === maxCount ? "url(#peakGlow)" : undefined}
+              />
+            ))}
+          </Bar>
+        </BarChart>
+      </ResponsiveContainer>
+    </div>
+  );
+}
+
 /* ── Main ────────────────────────────────────────────────────────────────── */
-export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTabProps) {
+export default function AnalyticsTab({ stats, pieData, sourceData, monthData }: AnalyticsTabProps) {
   const getRaw = (key: string): string | number | null => {
     if (key === "medianSalary") return stats.medianSalary;
     if (key === "avgResponseTime") return stats.avgResponseTime ? parseFloat(stats.avgResponseTime) : null;
@@ -150,6 +235,11 @@ export default function AnalyticsTab({ stats, pieData, sourceData }: AnalyticsTa
           <MetricCard key={cfg.key} cfg={cfg} raw={getRaw(cfg.key)} index={i} />
         ))}
       </div>
+
+      {/* ── Applications per Month ─────────────────────────────────── */}
+      <ChartCard title="Applications per Month" delay="stagger-2">
+        {monthData.length === 0 ? <EmptyChart label="monthly" /> : <MonthlyChart data={monthData} />}
+      </ChartCard>
 
       {/* ── Charts ─────────────────────────────────────────────────── */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">

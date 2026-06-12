@@ -29,6 +29,38 @@ async function generateCodeChallenge(verifier) {
     .replace(/\+/g, '-').replace(/\//g, '_').replace(/=/g, '');
 }
 
+// ─── Extraction cache (chrome.storage.session, cleared on browser close) ─────
+
+const CACHE_TTL_MS = 30 * 60 * 1000; // 30 minutes
+
+async function getCachedExtraction(url) {
+  try {
+    const { jtCache } = await chrome.storage.session.get('jtCache');
+    const entry = (jtCache || {})[url];
+    if (!entry || Date.now() - entry.ts > CACHE_TTL_MS) return null;
+    return entry.data;
+  } catch (_) {
+    return null;
+  }
+}
+
+async function setCachedExtraction(url, data) {
+  try {
+    const { jtCache } = await chrome.storage.session.get('jtCache');
+    const cache = jtCache || {};
+    cache[url] = { data, ts: Date.now() };
+    // Evict oldest entries beyond 30 URLs to keep storage small
+    const entries = Object.entries(cache);
+    if (entries.length > 30) {
+      entries.sort((a, b) => a[1].ts - b[1].ts);
+      const trimmed = Object.fromEntries(entries.slice(entries.length - 30));
+      await chrome.storage.session.set({ jtCache: trimmed });
+    } else {
+      await chrome.storage.session.set({ jtCache: cache });
+    }
+  } catch (_) {}
+}
+
 // ─── Session storage ─────────────────────────────────────────────────────────
 
 async function getSession() {
@@ -200,6 +232,19 @@ async function saveJob(jobData, token) {
   return data.data;
 }
 
+// ─── SW keepalive ─────────────────────────────────────────────────────────────
+// MV3 service workers are killed after ~30s of inactivity. Ping storage every
+// 20s to keep the SW alive during long async operations (e.g. AI extraction).
+
+async function withKeepAlive(promise) {
+  const id = setInterval(() => chrome.storage.local.get('_ka'), 20000);
+  try {
+    return await promise;
+  } finally {
+    clearInterval(id);
+  }
+}
+
 // ─── Message handler ──────────────────────────────────────────────────────────
 
 chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
@@ -226,18 +271,30 @@ async function handleMessage(message) {
       return { ok: true };
     }
     case 'EXTRACT_JOB': {
+      // Return cached result instantly if available (populated by content script on page load)
+      const cached = await getCachedExtraction(message.url);
+      if (cached) return { data: cached };
+
       const session = await getSession();
       if (!session) return { error: 'Not signed in' };
       const refreshed = await refreshIfNeeded(session);
-      // pageText is sent by popup.js (grabbed directly from the live tab)
-      const data = await extractJob(message.url, refreshed.access_token, message.pageText || null);
+      // pageText is sent by content.js and popup.js (grabbed directly from the live tab)
+      const data = await withKeepAlive(extractJob(message.url, refreshed.access_token, message.pageText || null));
+
+      // Cache so the popup can read it instantly without re-extracting
+      await setCachedExtraction(message.url, data);
       return { data };
+    }
+    case 'GET_CACHED_JOB': {
+      // Read-only cache lookup — popup uses this to show data without triggering extraction
+      const data = await getCachedExtraction(message.url);
+      return { data: data || null };
     }
     case 'SAVE_JOB': {
       const session = await getSession();
       if (!session) return { error: 'Not signed in' };
       const refreshed = await refreshIfNeeded(session);
-      const result = await saveJob(message.jobData, refreshed.access_token);
+      const result = await withKeepAlive(saveJob(message.jobData, refreshed.access_token));
       return { id: result?.id };
     }
     case 'CHECK_DUPLICATE': {

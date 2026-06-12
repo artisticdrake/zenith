@@ -6,7 +6,8 @@ const JOB_PATTERNS = [
   /greenhouse\.io\/jobs\//,
   /lever\.co\/.+\/(jobs|apply)\//,
   /workday\.com\/.+\/job\//,
-  /myworkdayjobs\.com\/.+\/job\//
+  /myworkdayjobs\.com\/.+\/job\//,
+  /app\.joinhandshake\.com\/jobs\//
 ];
 
 function isJobPage(url) {
@@ -21,6 +22,7 @@ function detectSource(url) {
   if (url.includes('greenhouse'))  return 'Greenhouse';
   if (url.includes('lever'))       return 'Lever';
   if (url.includes('workday') || url.includes('myworkdayjobs')) return 'Workday';
+  if (url.includes('joinhandshake'))  return 'Handshake';
   return 'Job Board';
 }
 
@@ -73,37 +75,19 @@ document.addEventListener('DOMContentLoaded', async () => {
     return;
   }
 
+  // Check if content script already extracted data for this page — show form instantly if so
+  try {
+    const cachedRes = await chrome.runtime.sendMessage({ type: 'GET_CACHED_JOB', url });
+    if (cachedRes?.data) {
+      populateAndShowForm(cachedRes.data, url);
+      return;
+    }
+  } catch (_) {}
+
   await runExtraction(url, tabId);
 });
 
-async function runExtraction(url, tabId) {
-  showScreen('screen-loading');
-
-  // Grab the full rendered page text directly from the tab (authenticated, JS-rendered).
-  // This is the key to getting the job description — server-side fetches miss auth-gated content.
-  let pageText = null;
-  if (tabId) {
-    try {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId },
-        func: () => document.body.innerText
-      });
-      pageText = results?.[0]?.result || null;
-    } catch (_) {}
-  }
-
-  let extracted = null;
-  try {
-    const res = await chrome.runtime.sendMessage({ type: 'EXTRACT_JOB', url, pageText });
-    if (res?.error) throw new Error(res.error);
-    extracted = res?.data || {};
-  } catch (e) {
-    document.getElementById('error-msg').textContent = e.message || 'Could not extract job data. Make sure the API server is running.';
-    showScreen('screen-error');
-    document.getElementById('btn-retry').addEventListener('click', () => window.location.reload());
-    return;
-  }
-
+function populateAndShowForm(extracted, url) {
   const source = detectSource(url);
   const jobDescription = extracted.jobDescription || '';
   document.getElementById('f-company').value  = extracted.company  || '';
@@ -181,7 +165,38 @@ async function runExtraction(url, tabId) {
     showHeader();
     showScreen('screen-success');
   });
-});
+}
+
+async function runExtraction(url, tabId) {
+  showScreen('screen-loading');
+
+  // Grab the full rendered page text directly from the tab (authenticated, JS-rendered).
+  // This is the key to getting the job description — server-side fetches miss auth-gated content.
+  let pageText = null;
+  if (tabId) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        func: () => document.body.innerText
+      });
+      pageText = results?.[0]?.result || null;
+    } catch (_) {}
+  }
+
+  let extracted = null;
+  try {
+    const res = await chrome.runtime.sendMessage({ type: 'EXTRACT_JOB', url, pageText });
+    if (res?.error) throw new Error(res.error);
+    extracted = res?.data || {};
+  } catch (e) {
+    document.getElementById('error-msg').textContent = e.message || 'Could not extract job data. Make sure the API server is running.';
+    showScreen('screen-error');
+    document.getElementById('btn-retry').addEventListener('click', () => window.location.reload());
+    return;
+  }
+
+  populateAndShowForm(extracted, url);
+}
 
 // ── Sign in ───────────────────────────────────────────────────────────────────
 

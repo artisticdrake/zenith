@@ -13,7 +13,8 @@
     "*://*.greenhouse.io/*",
     "*://*.lever.co/*",
     "*://*.workday.com/*",
-    "*://*.myworkdayjobs.com/*"
+    "*://*.myworkdayjobs.com/*",
+    "*://app.joinhandshake.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -28,7 +29,8 @@
         "*://*.lever.co/*/jobs/*",
         "*://*.lever.co/*/apply/*",
         "*://*.workday.com/*/job/*",
-        "*://*.myworkdayjobs.com/*/job/*"
+        "*://*.myworkdayjobs.com/*/job/*",
+        "*://app.joinhandshake.com/jobs/*"
       ],
       "js": ["content.js"],
       "run_at": "document_idle"

@@ -5,6 +5,7 @@ export const STATUSES = [
   "Interview Completed",
   "Offer",
   "Rejected",
+  "Ghosted",
   "Withdrawn",
 ] as const;
 
@@ -25,6 +26,7 @@ export const STATUS_CONFIG: Record<string, { color: string; bg: string; border: 
   "Interview Completed": { color: "text-teal-300",   bg: "bg-teal-500/10",   border: "border-teal-500/30"   },
   Offer:                 { color: "text-emerald-400", bg: "bg-emerald-500/10", border: "border-emerald-500/30" },
   Rejected:              { color: "text-red-400",    bg: "bg-red-500/10",    border: "border-red-500/30" },
+  Ghosted:               { color: "text-zinc-400",   bg: "bg-zinc-500/10",   border: "border-zinc-500/30" },
   Withdrawn:             { color: "text-slate-400",  bg: "bg-slate-500/10",  border: "border-slate-500/30" },
 };
 

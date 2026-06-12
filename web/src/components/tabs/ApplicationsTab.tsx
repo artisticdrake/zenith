@@ -28,7 +28,6 @@ interface ApplicationsTabProps {
   onEdit: (app: JobApplication) => void;
   onDelete: (id: string) => void;
   onRowClick: (app: JobApplication) => void;
-  onMatch: (app: JobApplication) => void;
   appScores: Record<string, number>;
   aiSummary: string;
   loadingSummary: boolean;
@@ -188,7 +187,7 @@ function CompanyAvatar({ company }: { company: string }) {
 export default function ApplicationsTab({
   apps, sortedApps, stats, loading,
   searchTerm, setSearchTerm, onAddNew,
-  onEdit, onDelete, onRowClick, onMatch,
+  onEdit, onDelete, onRowClick,
   appScores, aiSummary, loadingSummary, onRefreshSummary,
 }: ApplicationsTabProps) {
   const getStatValue = (key: string) => {
@@ -396,14 +395,6 @@ export default function ApplicationsTab({
                                 <TooltipContent className="text-xs">Open Job Post</TooltipContent>
                               </Tooltip>
                             )}
-                            <Tooltip>
-                              <TooltipTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-primary/10" onClick={() => onMatch(app)}>
-                                  <Sparkles className="h-3.5 w-3.5 text-primary/60 hover:text-primary" />
-                                </Button>
-                              </TooltipTrigger>
-                              <TooltipContent className="text-xs">Match Resume</TooltipContent>
-                            </Tooltip>
                             <Tooltip>
                               <TooltipTrigger asChild>
                                 <Button variant="ghost" size="icon" className="h-7 w-7 hover:bg-destructive/10" onClick={() => onDelete(app.id)}>
