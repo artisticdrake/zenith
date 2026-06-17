@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useReducer, useRef, useState } from 'react';
 import { supabase } from '@/lib/supabase';
+import { normalizeResumeContent, normalizeResumeSettings } from '@/lib/normalizeResume';
 import type { Session } from '@supabase/supabase-js';
 import {
   DEFAULT_RESUME_CONTENT,
@@ -63,6 +64,7 @@ interface UseResumeDataReturn {
   deleteVersion: (id: string) => Promise<void>;
   renameVersion: (id: string, name: string) => Promise<void>;
   switchVersion: (id: string) => void;
+  adoptServerVersion: (row: ResumeBuilderData) => void;
 }
 
 // ── Hook ─────────────────────────────────────────────────────────────────────
@@ -104,34 +106,19 @@ export function useResumeData(session: Session | null): UseResumeDataReturn {
       const fetched = (data ?? []) as ResumeBuilderData[];
       setVersions(fetched);
 
-      // ── Tailor handoff: consume pending content written by TailorTab ───────
-      // Read and atomically clear BEFORE setting loading=false so no matter how
-      // many times React StrictMode remounts/re-runs this, the tailor content wins.
-      let tailorContent: ResumeContent | null = null;
-      const pendingRaw = localStorage.getItem('jt.pending_tailor');
-      if (pendingRaw) {
-        localStorage.removeItem('jt.pending_tailor');
-        try { tailorContent = JSON.parse(pendingRaw); } catch { /* malformed — ignore */ }
-      }
-
+      // Load the newest version as the active resume. The Tailor "Send to
+      // Builder" flow assembles a fresh version server-side (POST /assemble/claude)
+      // before this runs, so it lands first here and becomes the active resume.
       if (fetched.length > 0) {
         const first = fetched[0];
         setActiveVersionId(first.id);
-        const contentToLoad = tailorContent ?? first.content ?? DEFAULT_RESUME_CONTENT;
-        dispatch({ type: 'RESET', payload: contentToLoad });
-        setSettingsState(first.settings ?? DEFAULT_SETTINGS);
-        // Persist the tailor content immediately so it survives a page reload
-        if (tailorContent) {
-          supabase
-            .from('resume_builder')
-            .update({ content: tailorContent, updated_at: new Date().toISOString() })
-            .eq('id', first.id)
-            .eq('user_id', userId)
-            .then(() => { /* best-effort */ });
-        }
+        dispatch({
+          type: 'RESET',
+          payload: first.content ? normalizeResumeContent(first.content) : DEFAULT_RESUME_CONTENT,
+        });
+        setSettingsState(normalizeResumeSettings(first.settings));
       } else {
-        const initial = tailorContent ?? DEFAULT_RESUME_CONTENT;
-        await createVersionInternal('My Resume', initial, DEFAULT_SETTINGS);
+        await createVersionInternal('My Resume', DEFAULT_RESUME_CONTENT, DEFAULT_SETTINGS);
       }
     } catch (err) {
       console.error('[useResumeData] fetchVersions error:', err);
@@ -236,8 +223,11 @@ export function useResumeData(session: Session | null): UseResumeDataReturn {
         const remaining = prev.filter((v) => v.id !== id);
         if (activeVersionIdRef.current === id && remaining.length > 0) {
           setActiveVersionId(remaining[0].id);
-          dispatch({ type: 'RESET', payload: remaining[0].content });
-          setSettingsState(remaining[0].settings);
+          dispatch({
+            type: 'RESET',
+            payload: remaining[0].content ? normalizeResumeContent(remaining[0].content) : DEFAULT_RESUME_CONTENT,
+          });
+          setSettingsState(normalizeResumeSettings(remaining[0].settings));
         }
         return remaining;
       });
@@ -263,11 +253,29 @@ export function useResumeData(session: Session | null): UseResumeDataReturn {
       const version = versions.find((v) => v.id === id);
       if (!version) return;
       setActiveVersionId(id);
-      dispatch({ type: 'RESET', payload: version.content });
-      setSettingsState(version.settings);
+      dispatch({
+        type: 'RESET',
+        payload: version.content ? normalizeResumeContent(version.content) : DEFAULT_RESUME_CONTENT,
+      });
+      setSettingsState(normalizeResumeSettings(version.settings));
     },
     [versions]
   );
+
+  // Adopt a version the server just created (e.g. /assemble's "Re-assemble").
+  // The row is already persisted — we only mirror it into local state and make
+  // it the active resume, without overwriting any existing version.
+  const adoptServerVersion = useCallback((row: ResumeBuilderData) => {
+    const normalized: ResumeBuilderData = {
+      ...row,
+      content: normalizeResumeContent(row.content),
+      settings: normalizeResumeSettings(row.settings),
+    };
+    setVersions((prev) => [normalized, ...prev.filter((v) => v.id !== normalized.id)]);
+    setActiveVersionId(normalized.id);
+    dispatch({ type: 'RESET', payload: normalized.content });
+    setSettingsState(normalized.settings);
+  }, []);
 
   return {
     versions,
@@ -287,5 +295,6 @@ export function useResumeData(session: Session | null): UseResumeDataReturn {
     deleteVersion,
     renameVersion,
     switchVersion,
+    adoptServerVersion,
   };
 }

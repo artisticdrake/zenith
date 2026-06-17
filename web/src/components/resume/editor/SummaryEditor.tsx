@@ -32,7 +32,7 @@ export default function SummaryEditor({ summary, showSummary, onSummaryChange, o
         <textarea
           className="w-full text-sm bg-background border border-border rounded px-2 py-1.5 resize-none outline-none focus:ring-1 focus:ring-primary/50 min-h-[80px]"
           value={summary}
-          placeholder="2–3 sentences about your background, skills, and what you're looking for. Use **bold** for keywords."
+          placeholder="2–3 sentences about your background, skills, and what you're looking for. Use **bold** for keywords and [text](url) for links."
           aria-label="Summary text"
           onChange={(e) => onSummaryChange(e.target.value)}
         />

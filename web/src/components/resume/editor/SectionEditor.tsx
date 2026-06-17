@@ -82,7 +82,7 @@ export default function SectionEditor({ section, onChange }: Props) {
             <textarea
               className="flex-1 text-sm bg-background border border-border rounded px-2 py-1.5 resize-none outline-none focus:ring-1 focus:ring-primary/50 min-h-[3rem]"
               value={item.content ?? ''}
-              placeholder="Custom content... Use **bold** and *italic*"
+              placeholder="Custom content... Use **bold**, *italic*, and [text](url) for links"
               aria-label={`Custom section content ${idx + 1}`}
               onChange={(e) => updateItem(idx, { ...item, content: e.target.value })}
             />

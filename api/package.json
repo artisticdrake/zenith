@@ -4,7 +4,8 @@
   "main": "src/index.ts",
   "scripts": {
     "dev": "tsx watch src/index.ts",
-    "build": "tsc"
+    "build": "tsc",
+    "test": "tsx tests/normalize.spec.ts && tsx tests/html.spec.ts"
   },
   "dependencies": {
     "@supabase/supabase-js": "^2.39.0",

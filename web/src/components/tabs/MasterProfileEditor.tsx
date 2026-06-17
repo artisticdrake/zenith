@@ -5,87 +5,22 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import {
+  EMPTY_PROFILE, normalizeProfile, tagsFromString,
+  type LibraryAward, type LibraryBullet, type LibraryEducation,
+  type LibraryExperience, type LibraryProject, type LibrarySkill,
+  type MasterProfile, type SummaryVariant,
+} from "@/lib/normalizeMasterProfile";
 
 const API = import.meta.env.VITE_API_URL ?? "http://localhost:3000";
-
-// ── Bullet text sanitization ─────────────────────────────────────────────────
-// Collapse hard line-breaks that enter from PDF paste. Called both on key input
-// and when importing JSON so existing data is cleaned on first load.
-
-function collapseNewlines(text: string): string {
-  return (text ?? '')
-    .replace(/\r\n|\r|\n/g, ' ')
-    .replace(/\s{2,}/g, ' ')
-    .trim();
-}
-
-function sanitizeProfileBullets<T extends object>(profile: T): T {
-  const walk = (val: unknown): unknown => {
-    if (Array.isArray(val)) return val.map(walk);
-    if (val && typeof val === 'object') {
-      const out: Record<string, unknown> = {};
-      for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
-        // Only sanitize bullet `text` fields, not all strings
-        out[k] = k === 'text' && typeof v === 'string' ? collapseNewlines(v) : walk(v);
-      }
-      return out;
-    }
-    return val;
-  };
-  return walk(profile) as T;
-}
 
 // ── Tiny helpers ──────────────────────────────────────────────────────────────
 
 const uid = () => Math.random().toString(36).slice(2, 9);
 
-function tagsFromString(s: string): string[] {
-  return s.split(",").map(t => t.trim()).filter(Boolean);
-}
 function tagsToString(tags: string[]): string {
   return tags.join(", ");
 }
-
-// ── Types (mirrors shared/types.ts MasterProfile) ─────────────────────────────
-
-interface LibraryBullet {
-  id: string; text: string; skills: string[];
-  metric?: string; strength: 1 | 2 | 3; tags: string[];
-}
-interface LibraryExperience {
-  id: string; org: string; role: string; location?: string;
-  startDate: string; endDate: string | null; current: boolean;
-  defaultInclude: boolean; tags: string[]; bullets: LibraryBullet[];
-}
-interface LibraryProject {
-  id: string; name: string; startDate?: string; endDate?: string;
-  tags: string[]; techStack: string[]; bullets: LibraryBullet[];
-}
-interface LibraryEducation {
-  id: string; institution: string; degree: string; field?: string;
-  startDate?: string; endDate?: string; gpa?: string;
-  defaultInclude: boolean; bullets: LibraryBullet[];
-}
-interface LibrarySkill {
-  canonical: string; display: string; category: string; proven: boolean;
-}
-interface SummaryVariant { id: string; text: string; tags: string[]; }
-interface LibraryAward { id: string; title: string; issuer?: string; date?: string; tags: string[]; }
-
-interface MasterProfile {
-  header: { name: string; title: string; phone: string; email: string; linkedin?: string; github?: string; portfolio?: string };
-  summaries: SummaryVariant[];
-  experiences: LibraryExperience[];
-  projects: LibraryProject[];
-  education: LibraryEducation[];
-  skills: LibrarySkill[];
-  awards: LibraryAward[];
-}
-
-const EMPTY_PROFILE: MasterProfile = {
-  header: { name: "", title: "", phone: "", email: "", linkedin: "", github: "", portfolio: "" },
-  summaries: [], experiences: [], projects: [], education: [], skills: [], awards: [],
-};
 
 // ── Shared field components ────────────────────────────────────────────────────
 
@@ -499,7 +434,7 @@ export default function MasterProfileEditor({ session, alwaysOpen, seedProfile }
   // When a seed profile arrives (from parse-from-resume), populate the editor
   useEffect(() => {
     if (!seedProfile) return;
-    setProfile({ ...EMPTY_PROFILE, ...sanitizeProfileBullets(seedProfile) });
+    setProfile(normalizeProfile(seedProfile));
     if (!open) setOpen(true);
   }, [seedProfile]); // eslint-disable-line react-hooks/exhaustive-deps
 
@@ -512,7 +447,7 @@ export default function MasterProfileEditor({ session, alwaysOpen, seedProfile }
       });
       const data = await res.json();
       if (data.data && Object.keys(data.data).length > 0) {
-        setProfile({ ...EMPTY_PROFILE, ...sanitizeProfileBullets(data.data) });
+        setProfile(normalizeProfile(data.data));
       }
     } catch (e: any) {
       setErrorMsg(e.message);
@@ -719,8 +654,10 @@ export default function MasterProfileEditor({ session, alwaysOpen, seedProfile }
                       onClick={() => {
                         try {
                           const parsed = JSON.parse(jsonImportText);
-                          // Sanitize bullet texts on import — collapses PDF-pasted newlines
-                          setProfile({ ...EMPTY_PROFILE, ...sanitizeProfileBullets(parsed) });
+                          if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
+                            throw new Error("expected a MasterProfile object at the top level");
+                          }
+                          setProfile(normalizeProfile(parsed));
                           setJsonImportText("");
                           setJsonImportError(null);
                           setShowJsonPanel(false);

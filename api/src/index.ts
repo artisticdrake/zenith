@@ -5,8 +5,9 @@ import crypto from 'crypto';
 import { supabase, getAuthClient } from './lib/supabase';
 import { requireAuth } from './middleware/auth';
 import OpenAI from 'openai';
-import { resumeContentToHtml } from './export/resumeToHtml';
+import { resumeContentToHtml, resumeContentToText } from './export/resumeToHtml';
 import { generatePdf } from './export/pdfExport';
+import { normalizeResumeContent, normalizeResumeSettings, normalizeReview } from './lib/normalizeResume';
 
 dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
@@ -23,6 +24,9 @@ function getOpenAI() {
 const sha = (s: string) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 32);
 const hashJD = (jd: string) => sha(jd.replace(/\s+/g, ' ').trim().toLowerCase());
 const hashProfile = (lib: unknown) => sha(JSON.stringify(lib ?? {}));
+// Content hash is over the RENDERED (ATS-visible) text — the same bytes /export/pdf
+// exposes — so a score keyed on it always matches what a recruiter's parser reads.
+const hashContent = (rc: unknown) => sha(resumeContentToText(rc as any));
 
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
@@ -659,8 +663,9 @@ app.post('/tailor/claude', requireAuth, async (req, res) => {
       console.log(`[/tailor/claude] cache hit userId=${userId} jdHash=${jdHash}`);
       return res.json({
         success: true,
-        resumeContent: cached.resume_content,
-        review: cached.review ?? null,
+        // Normalize on read too — rows cached before normalization existed
+        resumeContent: normalizeResumeContent(cached.resume_content),
+        review: normalizeReview(cached.review),
         fromCache: true,
       });
     }
@@ -697,6 +702,19 @@ qualifications to improve the verdict.
 SCOPING (these two review fields must never duplicate each other):
 - genuineGaps: specific JD requirements the candidate genuinely LACKS — the verdict's evidence
 - suggestions: how to strengthen what the candidate DOES have — actionable improvements on existing strengths
+
+ACTIONABLE BULLETS — required: For EVERY suggestion you give, also produce a matching entry in
+"bulletSuggestions": a concrete, ready-to-paste resume line the candidate can drop straight into the
+Builder. Each entry has:
+- "section": which Builder section it belongs in — "experience", "projects", "skills", or "summary"
+- "target": the company/role/project name it should sit under (omit for skills/summary)
+- "guidance": the same advice, phrased as why this strengthens the resume for THIS JD
+- "bullet": the exact text to paste. For experience/projects write a strong, metric-led resume bullet
+  in the candidate's voice; for skills give a comma-separated list; for summary give one sentence.
+Ground every bullet in the candidate's real Master Profile background — never fabricate. Where a metric
+or specific detail would strengthen it but is not in the profile, use a clear placeholder like "[X]%" or
+"[N] users" so the candidate fills in the real number. There must be one bulletSuggestions entry per
+suggestion (and you may add a few more high-value ones).
 
 matchScore: provide an integer 0–100 reflecting how well this candidate's real background meets this JD.
 Calibrate honestly: 80–100 = strong fit, most core requirements met; 50–79 = partial fit, notable gaps;
@@ -772,6 +790,9 @@ REQUIRED OUTPUT JSON STRUCTURE (follow exactly — the Builder depends on these 
     "droppedItems": ["Experience: Role at Org — reason dropped"],
     "skillsSurfaced": ["skill1", "skill2"],
     "suggestions": ["How to strengthen something the candidate DOES have — do NOT list gap requirements here"],
+    "bulletSuggestions": [
+      { "section": "experience", "target": "Company Name", "guidance": "Why this strengthens the resume for this JD", "bullet": "Ready-to-paste resume bullet, metric-led, in the candidate's voice (use [X] placeholders for unknown numbers)" }
+    ],
     "fitAssessment": { "level": "strong | moderate | weak", "rationale": "1-2 sentences on fit verdict based on real evidence from Master Profile vs JD" },
     "recommendation": "One-liner: e.g. 'Strong match — apply.' or 'Weak fit; your ML edge is buried here — deprioritize.'",
     "genuineGaps": ["Specific JD requirement the candidate lacks — e.g. 'Windows Server / AD'", "3+ yrs enterprise IT (candidate has 1)"],
@@ -832,13 +853,16 @@ Return ONLY the JSON object as described in the system prompt. No markdown, no e
       }
     }
 
-    const resumeContent = parsed.resumeContent;
-    const review = parsed.review ?? null;
-
-    if (!resumeContent?.sections) {
+    if (!Array.isArray(parsed.resumeContent?.sections) || parsed.resumeContent.sections.length === 0) {
       console.error('[/tailor/claude] missing resumeContent.sections in:', JSON.stringify(parsed).slice(0, 300));
       return res.status(500).json({ success: false, error: 'Claude response missing resumeContent.sections', raw: rawText.slice(0, 300) });
     }
+
+    // Coerce to the exact ResumeContent shape the Builder depends on BEFORE
+    // caching — a creative Claude response must never poison tailor_results
+    // or crash the Builder render.
+    const resumeContent = normalizeResumeContent(parsed.resumeContent);
+    const review = normalizeReview(parsed.review);
 
     // Persist to cache — score lives here so it is never recomputed for an unchanged JD+profile
     const { error: saveErr } = await supabase
@@ -870,61 +894,393 @@ Return ONLY the JSON object as described in the system prompt. No markdown, no e
   }
 });
 
-// ── Batch Claude scores for application badges ─────────────────────────────────
-// GET /scores/claude
-// Returns: { scores: { [applicationId]: number } }
-// An application gets a badge when a tailor run exists for its exact JD text
-// (matched by jd_hash). One request covers all applications — no N+1.
-app.get('/scores/claude', requireAuth, async (req, res) => {
+// ── Re-rank an edited resume against a JD ──────────────────────────────────────
+// POST /rerank/claude
+// Body: { jobDescription: string, resumeContent: ResumeContent }
+// Scores the resume EXACTLY AS WRITTEN (after Builder edits) against the JD.
+// Unlike /tailor/claude this does NOT regenerate from the Master Profile — it
+// grades the content the user is actually looking at. Returns { review }.
+app.post('/rerank/claude', requireAuth, async (req, res) => {
   const userId = (req as any).user.id;
   const authClient = getAuthClient(req.headers.authorization as string);
+  const { jobDescription, resumeContent: rawContent } = req.body;
 
-  const { data: apps, error: appsErr } = await authClient
-    .from('applications')
-    .select('id, job_description')
-    .eq('user_id', userId);
-
-  if (appsErr) return res.status(400).json({ success: false, error: appsErr.message });
-
-  const { data: results, error: resultsErr } = await supabase
-    .from('tailor_results')
-    .select('jd_hash, score, created_at')
-    .eq('user_id', userId)
-    .not('score', 'is', null)
-    .order('created_at', { ascending: false });
-
-  if (resultsErr) {
-    // Table missing or query failed — return empty scores rather than breaking the UI
-    console.warn('[/scores/claude] lookup failed:', resultsErr.message);
-    return res.json({ success: true, scores: {} });
+  if (!jobDescription || typeof jobDescription !== 'string') {
+    return res.status(400).json({ success: false, error: 'jobDescription is required' });
+  }
+  if (!rawContent || typeof rawContent !== 'object') {
+    return res.status(400).json({ success: false, error: 'resumeContent is required' });
   }
 
-  // Keep the most recent score per jd_hash (results are sorted newest-first)
-  const scoreByHash: Record<string, number> = {};
-  for (const r of results ?? []) {
-    if (scoreByHash[r.jd_hash] === undefined) scoreByHash[r.jd_hash] = r.score;
+  // Coerce to the known shape, then key the score on the RENDERED text + JD.
+  const resumeContent = normalizeResumeContent(rawContent);
+  const jdHash = hashJD(jobDescription);
+  const contentHash = hashContent(resumeContent);
+
+  // Cache check — identical rendered text + JD returns the stored score with NO
+  // Claude call (score stability; reverting an edit returns the same number free).
+  try {
+    const { data: cached } = await authClient
+      .from('resume_scores')
+      .select('score, review')
+      .eq('user_id', userId)
+      .eq('jd_hash', jdHash)
+      .eq('content_hash', contentHash)
+      .maybeSingle();
+    if (cached) {
+      return res.json({ success: true, review: cached.review, score: cached.score, contentHash, fromCache: true });
+    }
+  } catch (err: any) {
+    console.warn('[/rerank/claude] score-cache lookup failed (continuing):', err.message);
   }
 
-  const scores: Record<string, number> = {};
-  for (const app of apps ?? []) {
-    if (!app.job_description?.trim()) continue;
-    const score = scoreByHash[hashJD(app.job_description)];
-    if (score !== undefined) scores[app.id] = score;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
   }
 
-  return res.json({ success: true, scores });
+  const systemPrompt = `You are an honest, rigorous resume evaluator. You are given a candidate's CURRENT resume (already written and edited by them) and a target job description. Score how well THIS resume — exactly as written — matches the job description.
+
+HARD RULES — non-negotiable:
+1. Judge ONLY what is actually present in the resume. Do NOT assume skills, tools, or experience that are not written there.
+2. Be honest and candid. Do NOT inflate the score to be encouraging — you are an evaluator, not a cheerleader.
+3. Return ONLY valid JSON — no markdown fences, no explanation, no preamble.
+
+SCOPING (these two fields must never duplicate each other):
+- genuineGaps: specific JD requirements this resume does NOT evidence.
+- suggestions: concrete edits to improve THIS resume's match — wording, ordering, emphasis, which existing content to surface.
+
+ACTIONABLE BULLETS — required: For EVERY suggestion, also produce a matching "bulletSuggestions" entry the
+candidate can paste straight into the Builder: { "section": "experience"|"projects"|"skills"|"summary",
+"target": company/role/project it sits under (omit for skills/summary), "guidance": why it helps for THIS
+JD, "bullet": the exact text to paste }. Keep bullets grounded in what the resume already shows; use a
+"[X]" placeholder for any metric not present rather than inventing one.
+
+matchScore: integer 0–100 reflecting how well the resume as written meets this JD.
+80–100 = strong fit, most core requirements clearly evidenced; 50–79 = partial fit, notable gaps;
+below 50 = weak fit, fundamental mismatches. Must be consistent with fitAssessment.level.
+
+REQUIRED OUTPUT JSON STRUCTURE (follow exactly):
+{
+  "review": {
+    "summary": "1-2 sentence assessment of how this resume reads against the JD",
+    "skillsSurfaced": ["key matching skills this resume already surfaces well"],
+    "suggestions": ["concrete edit to strengthen the match using content already present"],
+    "bulletSuggestions": [
+      { "section": "experience", "target": "Company Name", "guidance": "Why this edit helps for this JD", "bullet": "Ready-to-paste resume line grounded in existing content (use [X] for missing metrics)" }
+    ],
+    "fitAssessment": { "level": "strong | moderate | weak", "rationale": "1-2 sentences grounded in resume vs JD evidence" },
+    "recommendation": "One-liner verdict, e.g. 'Strong match — apply.' or 'Surface your ML work higher; it's buried.'",
+    "genuineGaps": ["Specific JD requirement not evidenced in the resume"],
+    "matchScore": 73
+  }
+}`;
+
+  const userMessage = `Evaluate the candidate's CURRENT resume against the target job description and return the JSON review described in the system prompt.
+
+TARGET JOB DESCRIPTION:
+${jobDescription.slice(0, 6000)}
+
+CANDIDATE'S CURRENT RESUME (plain text — exactly as it renders, do not invent beyond it):
+${resumeContentToText(resumeContent).slice(0, 9000)}
+
+Return ONLY the JSON object. No markdown, no extra text.`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 2000,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    });
+
+    const responseData = await response.json() as any;
+    if (!response.ok) {
+      const errMsg = responseData?.error?.message || 'Claude API error';
+      console.error('[/rerank/claude] Anthropic error:', errMsg);
+      return res.status(500).json({ success: false, error: errMsg });
+    }
+
+    const rawText: string = responseData?.content?.[0]?.text ?? '';
+
+    let parsed: any;
+    try {
+      const cleaned = rawText
+        .replace(/^```(?:json)?\s*/m, '')
+        .replace(/\s*```\s*$/m, '')
+        .trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (!match) {
+        console.error('[/rerank/claude] invalid JSON from Claude:', rawText.slice(0, 300));
+        return res.status(500).json({ success: false, error: 'Claude returned malformed JSON' });
+      }
+      try { parsed = JSON.parse(match[0]); }
+      catch { return res.status(500).json({ success: false, error: 'Could not parse Claude response as JSON' }); }
+    }
+
+    const review = normalizeReview(parsed.review ?? parsed);
+    if (!review) {
+      return res.status(500).json({ success: false, error: 'Claude response missing review' });
+    }
+
+    const score = typeof review.matchScore === 'number' ? Math.round(review.matchScore) : null;
+
+    // Persist into the content-addressed score store so the same rendered text +
+    // JD never costs another Claude call.
+    try {
+      await authClient.from('resume_scores').upsert({
+        user_id: userId,
+        jd_hash: jdHash,
+        content_hash: contentHash,
+        score,
+        review,
+      }, { onConflict: 'user_id,jd_hash,content_hash' });
+    } catch (err: any) {
+      console.warn('[/rerank/claude] failed to cache score (continuing):', err.message);
+    }
+
+    console.log(`[/rerank/claude] userId=${userId} fit=${review.fitAssessment?.level ?? 'none'} score=${score ?? 'n/a'}`);
+    return res.json({ success: true, review, score, contentHash, fromCache: false });
+  } catch (err: any) {
+    console.error('[/rerank/claude] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
+
+// ── Assemble a new resume from master profile + current resume + approved bullets ─
+// POST /assemble/claude
+// Body: { jobDescription: string, approvedBullets: [{ id, text, section, target }], company?: string, role?: string }
+// Treats every bullet across the Master Profile, the user's CURRENT resume, and the
+// approved new bullets as candidate "blocks", and asks Claude to assemble the single
+// best one-page resume. Writes the result as a NEW resume_builder version (never
+// overwrites the previous one). Returns { version, resumeContent, score, changeLog }.
+app.post('/assemble/claude', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { jobDescription, approvedBullets: rawBullets, company, role, currentResume: rawCurrentResume } = req.body;
+
+  if (!jobDescription || typeof jobDescription !== 'string') {
+    return res.status(400).json({ success: false, error: 'jobDescription is required' });
+  }
+
+  const approvedBullets = Array.isArray(rawBullets)
+    ? rawBullets
+        .filter((b: any) => b && typeof b.text === 'string' && b.text.trim())
+        .map((b: any) => ({
+          id: typeof b.id === 'string' ? b.id : undefined,
+          text: String(b.text).trim(),
+          section: typeof b.section === 'string' ? b.section : 'experience',
+          target: typeof b.target === 'string' ? b.target : undefined,
+        }))
+    : [];
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  // Source 1: Master Profile (the full content library)
+  const { data: profileRow, error: profileErr } = await authClient
+    .from('master_profile')
+    .select('content')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (profileErr) return res.status(500).json({ success: false, error: profileErr.message });
+
+  const lib = profileRow?.content;
+  if (!lib?.experiences?.length && !lib?.projects?.length && !approvedBullets.length) {
+    return res.status(400).json({ success: false, error: 'Master profile is empty and no bullets were approved. Build your Master Profile or approve some bullets first.' });
+  }
+
+  // Source 2: the user's CURRENT resume. A Builder-initiated "Re-assemble" passes
+  // the LIVE (possibly edited) content explicitly; otherwise fall back to the
+  // latest saved builder version. We still read the latest version for its
+  // settings (so the new version inherits formatting).
+  const { data: latestVersion } = await authClient
+    .from('resume_builder')
+    .select('id, content, settings')
+    .eq('user_id', userId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  const currentResume = (rawCurrentResume && typeof rawCurrentResume === 'object')
+    ? normalizeResumeContent(rawCurrentResume)
+    : latestVersion?.content
+      ? normalizeResumeContent(latestVersion.content)
+      : null;
+
+  const systemPrompt = `You are a resume assembler. You are given THREE sources of candidate content: (1) the candidate's full Master Profile JSON, (2) their CURRENT resume content, and (3) a set of APPROVED new bullets the candidate explicitly selected. Treat every bullet across all three as a candidate 'block'.
+
+Your job: assemble the single best ONE-PAGE resume for the target job description, maximizing genuine fit and recruiter callback likelihood — honestly.
+
+You have FULL AUTHORITY to keep, cut, reorder, condense, and replace blocks. An approved new bullet may replace a weaker existing bullet or earn an added slot — your judgment. Decide what stays and what goes.
+
+HARD RULES:
+1. ONE PAGE. Be selective; balance section density toward impact.
+2. Use ONLY facts present in the Master Profile, the current resume, or the approved bullets. NEVER invent or embellish any skill, metric, tool, title, experience, or project.
+3. If an approved bullet contains a placeholder like [X], keep it verbatim. NEVER fabricate a number to fill it.
+4. Do not optimize toward the score; optimize for honest, relevant presentation.
+5. Return ONLY valid JSON, no markdown fences, no preamble.
+
+MASTER PROFILE:
+${JSON.stringify(lib ?? {}, null, 2)}
+
+CURRENT RESUME:
+${currentResume ? JSON.stringify(currentResume) : 'None — the candidate has no existing resume yet. Build from the Master Profile and approved bullets.'}
+
+APPROVED BULLETS:
+${JSON.stringify(approvedBullets, null, 2)}
+
+Output JSON shape:
+{ "resumeContent": { "header": {...}, "summary": "...", "showSummary": true, "sections": [...] },
+  "score": <integer 0-100, honest fit of THIS assembled resume to the JD>,
+  "changeLog": [ "<short line: kept/dropped/replaced X because Y>", ... ] }
+
+The resumeContent.sections must follow this shape exactly (the Builder depends on these field names):
+{ "id": "experience", "type": "experience", "title": "Experience", "visible": true,
+  "items": [{ "id": "exp-1", "organization": "", "role": "", "location": "", "date": "Jan 2023 – Present", "bullets": [{ "id": "b-1", "text": "" }] }] }
+Use type "projects" (items have projectName, techStack, dateRange, bullets), "education" (items have organization, role, date), and "skills" (items have category, items as a comma-separated string).`;
+
+  const userMessage = `Assemble the best one-page resume for the following job description. Return ONLY the JSON object described in the system prompt.
+
+TARGET JOB DESCRIPTION:
+${jobDescription.slice(0, 6000)}`;
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 6000,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    });
+
+    const responseData = await response.json() as any;
+    if (!response.ok) {
+      const errMsg = responseData?.error?.message || 'Claude API error';
+      console.error('[/assemble/claude] Anthropic error:', errMsg);
+      return res.status(500).json({ success: false, error: errMsg });
+    }
+
+    const rawText: string = responseData?.content?.[0]?.text ?? '';
+
+    let parsed: any;
+    try {
+      const cleaned = rawText
+        .replace(/^```(?:json)?\s*/m, '')
+        .replace(/\s*```\s*$/m, '')
+        .trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (!match) {
+        console.error('[/assemble/claude] invalid JSON from Claude:', rawText.slice(0, 300));
+        return res.status(500).json({ success: false, error: 'Claude returned malformed JSON' });
+      }
+      try { parsed = JSON.parse(match[0]); }
+      catch { return res.status(500).json({ success: false, error: 'Could not parse Claude response as JSON' }); }
+    }
+
+    if (!Array.isArray(parsed.resumeContent?.sections) || parsed.resumeContent.sections.length === 0) {
+      return res.status(500).json({ success: false, error: 'Claude response missing resumeContent.sections' });
+    }
+
+    // Coerce to the Builder's exact shape before persisting
+    const resumeContent = normalizeResumeContent(parsed.resumeContent);
+    const score = typeof parsed.score === 'number' ? Math.round(parsed.score) : null;
+    const changeLog = Array.isArray(parsed.changeLog)
+      ? parsed.changeLog.filter((c: any) => typeof c === 'string').slice(0, 30)
+      : [];
+
+    // The JD travels with the version so the Builder knows what to score against.
+    const jdHash = hashJD(jobDescription);
+
+    // Write a NEW version — never overwrite the previous one
+    const label = (typeof company === 'string' && company.trim())
+      || (typeof role === 'string' && role.trim())
+      || 'Resume';
+    const versionName = `Tailored — ${label} ${new Date().toISOString()}`;
+
+    const { data: version, error: insertErr } = await authClient
+      .from('resume_builder')
+      .insert({
+        user_id: userId,
+        version_name: versionName,
+        content: resumeContent,
+        settings: latestVersion?.settings ?? {},
+        job_description: jobDescription,
+        jd_hash: jdHash,
+        updated_at: new Date().toISOString(),
+      })
+      .select()
+      .single();
+
+    if (insertErr) {
+      console.error('[/assemble/claude] failed to create version:', insertErr.message);
+      return res.status(500).json({ success: false, error: insertErr.message });
+    }
+
+    // Prime the score store so the freshly assembled resume is already scored —
+    // the Builder's first (auto) re-rank on this content is a cache hit, no spend.
+    try {
+      const contentHash = hashContent(resumeContent);
+      await authClient.from('resume_scores').upsert({
+        user_id: userId,
+        jd_hash: jdHash,
+        content_hash: contentHash,
+        score,
+        review: { matchScore: score, source: 'assemble', changeLog },
+      }, { onConflict: 'user_id,jd_hash,content_hash' });
+    } catch (err: any) {
+      console.warn('[/assemble/claude] failed to prime score (continuing):', err.message);
+    }
+
+    console.log(`[/assemble/claude] userId=${userId} approvedBullets=${approvedBullets.length} score=${score ?? 'n/a'} versionId=${version?.id}`);
+
+    return res.json({ success: true, version, resumeContent, score, changeLog });
+  } catch (err: any) {
+    console.error('[/assemble/claude] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// Scores live only in the tailor/builder flow now (resume_scores, content-addressed).
+// The old Applications-tab badge endpoint (GET /scores/claude) has been removed;
+// tailor_results remains purely as the generation cache.
 
 // ── PDF Export (Puppeteer — text-native, ATS-safe) ─────────────────────────────
 
 app.post('/export/pdf', requireAuth, async (req, res) => {
-  const { content, settings } = req.body;
+  const { content: rawContent, settings: rawSettings } = req.body;
 
-  if (!content || !settings) {
+  if (!rawContent || !rawSettings) {
     return res.status(400).json({ success: false, error: 'content and settings are required' });
   }
 
   try {
+    // Coerce to a guaranteed-valid shape — resumeContentToHtml and the
+    // regression guard dereference nested fields unconditionally
+    const content = normalizeResumeContent(rawContent);
+    const settings = normalizeResumeSettings(rawSettings);
     const html = resumeContentToHtml(content, settings);
     const pdfBuffer = await generatePdf(html, content);
 

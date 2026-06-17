@@ -1,995 +1,248 @@
-# Job Tracker SaaS
+# Zenith
 
-A full-stack job application management platform with AI-powered resume matching, a deterministic resume tailor, a full resume builder, analytics dashboard, and a Chrome extension for one-click job saving.
+**Zenith is an AI job-search command center.** Track every application through its full lifecycle, keep your entire career history in one **Master Profile**, and let Claude tailor a one-page, ATS-safe resume for any job description — with a live, content-addressed match score that follows whatever you edit in the Builder.
 
----
+Two principles run through the whole product:
 
-## Table of Contents
-
-1. [Monorepo Structure](#monorepo-structure)
-2. [Request & Auth Flow](#request--auth-flow)
-3. [Tech Stack](#tech-stack)
-4. [Database Schema](#database-schema)
-5. [API Reference](#api-reference)
-6. [Pipeline: Hybrid Resume Matching](#pipeline-hybrid-resume-matching)
-7. [Pipeline: Zenith Tailor (Resume Generation)](#pipeline-zenith-tailor-resume-generation)
-8. [Pipeline: Resume Builder](#pipeline-resume-builder)
-9. [Pipeline: Autofill (Chrome Extension)](#pipeline-autofill-chrome-extension)
-10. [Frontend Architecture](#frontend-architecture)
-11. [Chrome Extension Deep Dive](#chrome-extension-deep-dive)
-12. [Authentication & Security](#authentication--security)
-13. [Running Locally](#running-locally)
-14. [Environment Variables](#environment-variables)
-15. [Known Edge Cases & Bug Surfaces](#known-edge-cases--bug-surfaces)
+1. **The Master Profile is the single source of truth.** Every tailored resume is selected/cut/reordered/condensed from facts that already exist in it — nothing is invented.
+2. **Claude is the sole tailoring *and* scoring brain.** There is no deterministic scoring engine; every score is a Claude assessment of the *rendered* resume text against the JD.
 
 ---
 
-## Monorepo Structure
+## Table of contents
+
+1. [Monorepo layout](#monorepo-layout)
+2. [Tech stack](#tech-stack)
+3. [Core flows](#core-flows)
+4. [Scoring model](#scoring-model)
+5. [The LLM pipeline (all prompts)](#the-llm-pipeline-all-prompts)
+6. [API reference](#api-reference)
+7. [Database schema](#database-schema)
+8. [Frontend architecture](#frontend-architecture)
+9. [Chrome extension](#chrome-extension)
+10. [Running locally](#running-locally)
+11. [Environment variables](#environment-variables)
+12. [Database migrations](#database-migrations)
+13. [Testing](#testing)
+14. [Security](#security)
+
+---
+
+## Monorepo layout
+
+npm workspaces, three packages:
 
 ```
 job-tracker-saas/
-├── api/                    # Express.js + TypeScript backend (port 3000)
-│   └── src/
-│       ├── index.ts        # All routes (single file)
-│       ├── matcher.ts      # Hybrid matching pipeline (parseJD, parseResume, score, explain)
-│       ├── middleware/
-│       │   └── auth.ts     # requireAuth middleware
-│       ├── lib/
-│       │   ├── supabase.ts         # Admin client + per-request auth client
-│       │   └── skillDictionary.ts  # 200+ skill entries with aliases, weights, implication rules
-│       └── tailor/
-│           ├── tailorResume.ts         # Pure-JS resume selection engine
-│           └── resumeContentToText.ts  # ResumeContent → plain text serializer
-│
-├── web/                    # React + Vite frontend (port 5173)
-│   └── src/
-│       ├── App.tsx
-│       ├── pages/
-│       │   └── ResumeBuilder.tsx       # Thin page wrapper
-│       ├── components/
-│       │   ├── JobApplicationTracker.tsx   # Root authenticated shell + all shared state
-│       │   ├── layout/
-│       │   │   └── Sidebar.tsx         # Tab nav (TabId type lives here)
-│       │   ├── tabs/
-│       │   │   ├── ApplicationsTab.tsx
-│       │   │   ├── FilesTab.tsx
-│       │   │   ├── AnalyticsTab.tsx
-│       │   │   ├── ProfileTab.tsx
-│       │   │   ├── TailorTab.tsx       # Zenith Tailor UI
-│       │   │   └── MasterProfileEditor.tsx  # Section-wise library editor
-│       │   ├── resume/
-│       │   │   ├── ResumeBuilderLayout.tsx  # Orchestrates editor + preview
-│       │   │   ├── toolbar/
-│       │   │   ├── editor/             # EditorPanel, SectionList, ExperienceItem, ProjectItem, SkillsItem, BulletEditor
-│       │   │   ├── preview/            # ResumePreview, PreviewExperience, PreviewProject, PreviewSkills, PreviewHeader, PreviewSection
-│       │   │   ├── import/             # VaultPickerModal, SectionClassifierModal
-│       │   │   └── export/
-│       │   │       ├── generatePDF.ts  # html2canvas + jsPDF export
-│       │   │       └── generateLatex.ts
-│       │   ├── modals/
-│       │   │   ├── AppFormModal.tsx
-│       │   │   ├── AppDetailModal.tsx
-│       │   │   ├── DeleteConfirmDialog.tsx
-│       │   │   └── MatchDialog.tsx
-│       │   └── MatchResult.tsx
-│       ├── hooks/
-│       │   ├── useResumeData.ts    # All resume builder state, versions, undo/redo, auto-save
-│       │   ├── useAutoFit.ts       # Auto-adjust font/spacing to fit one page
-│       │   └── useVaultResumes.ts  # Vault resume list for import
-│       ├── lib/
-│       │   ├── types.ts            # JobApplication, Resume, MatchResult, AppFormData
-│       │   ├── constants.ts        # STATUSES, SOURCES, STATUS_CONFIG, API_URL
-│       │   ├── supabase.ts         # Browser Supabase client
-│       │   ├── dateUtils.ts
-│       │   ├── utils.ts
-│       │   └── resumeTextParser.ts # Plain text → ResumeContent parser (used by import flow)
-│       └── types/
-│           └── resume.types.ts     # ResumeContent, ResumeSection, BulletItem, ResumeSettings, defaults
-│
-├── extension/              # Chrome Manifest V3 extension
-│   └── src/
-│       ├── manifest.json
-│       ├── background.js   # Service worker: API calls, OAuth tokens, keep-alive
-│       ├── content.js      # Injected into job board pages
-│       └── popup.js        # Extension popup UI
-│
-├── shared/
-│   └── types.ts            # ApplicationStatus, JobImportPayload, MasterProfile + Library* types
-│
-└── package.json            # npm workspaces root
+├── web/          React + Vite SPA          (port 5173)
+├── api/          Express + TypeScript API  (port 3000, tsx watch)
+├── extension/    Chrome Manifest v3 ext    (LinkedIn autofill)
+├── api/migrations/   SQL to apply in Supabase
+└── package.json  workspace root + scripts
 ```
+
+> **Every LLM prompt lives in one file: `api/src/index.ts`.** The web app and extension contain no prompts — they only call API endpoints.
 
 ---
 
-## Request & Auth Flow
+## Tech stack
 
-```
-Browser (web/)
-  → Supabase Google OAuth → access_token (JWT)
-  → Every API call: Authorization: Bearer <token>
-  → api/ requireAuth middleware validates token via supabase.auth.getUser()
-  → Route handler uses getAuthClient(token) for RLS-scoped DB queries
-  → Supabase enforces user_id = auth.uid() on every table
-
-Chrome Extension
-  → PKCE OAuth via chrome.identity.launchWebAuthFlow()
-  → Tokens stored in chrome.storage.local
-  → API calls to localhost:3000 with Bearer token
-  → After save, redirects browser to localhost:5173
-```
-
----
-
-## Tech Stack
-
-| Layer | Technologies |
+| Layer | Choice |
 |---|---|
-| Frontend | React 18, Vite, TypeScript, Tailwind CSS, Radix UI, Recharts |
-| Backend | Express.js, Node.js, TypeScript, tsx watch |
-| Auth & DB | Supabase (PostgreSQL + Auth + Storage) |
-| AI / LLM | OpenAI GPT-4.1-mini, GPT-4o-mini; Anthropic claude-sonnet-4-6 |
-| Extension | Chrome Manifest V3, vanilla JS |
-| File Parsing | pdf-parse (PDF), mammoth (DOCX) |
-| Resume Builder | @dnd-kit (drag-to-reorder), html2canvas + jsPDF (PDF export) |
-| Build | Vite, TypeScript compiler, concurrently |
+| Frontend | React 18, Vite, TypeScript, Tailwind, Radix UI, `@dnd-kit`, Recharts, lucide-react |
+| Backend | Node + Express, TypeScript via `tsx`, Puppeteer (PDF), `pdf-parse` / `mammoth` (resume import) |
+| Auth & DB | Supabase (Postgres + Auth + Storage, Row-Level Security) |
+| AI — tailoring & scoring | **Claude `claude-sonnet-4-6`** (Anthropic) |
+| AI — utility parsing | OpenAI `gpt-4o-mini` (autofill, Mira summary), `gpt-4.1-mini` (resume → profile seed) |
+| Extension | Manifest v3, content script + background worker, PKCE OAuth |
 
 ---
 
-## Database Schema
+## Core flows
 
-### `applications`
 ```
-id                uuid        PK
-user_id           uuid        → auth.users
-company           text
-position          text
-location          text
-salary            text
-date_applied      date
-status            text        Applied | Screening | Interview Scheduled | Interview Completed | Offer | Rejected | Ghosted | Withdrawn
-source            text        LinkedIn | Handshake | Jobright | Glassdoor | Indeed | Interstride | Other
-referral          text        Yes | No
-job_url           text
-job_description   text
-notes             text
-documents         jsonb       { name, dateApplied }[]
-timeline          jsonb       { status, ts (unix ms), auto? }[]
-last_updated      timestamp
-parsed_jd         jsonb       cached ParsedJD (prefixed "v2" for cache busting)
+Master Information ──► Tailor ──► Resume Builder ──► PDF
+(profile = truth)      (Claude)   (live scoring)     (ATS-safe)
 ```
 
-### `resumes`
-```
-id                uuid        PK
-user_id           uuid        → auth.users
-file_name         text
-file_type         text        MIME type
-file_size         bigint
-uploaded_at       timestamp
-extracted_text    text        plain text from PDF/DOCX parse
-is_active         boolean     one active per user (used as default for matching)
-storage_path      text        Supabase Storage path
-resume_hash       text        SHA-256[0:32] for duplicate detection
-parsed_resume     jsonb       cached ParsedResume (prefixed "v2")
-```
+**1 — Master Information.** Build/maintain the Master Profile (experiences, projects, education, skills, summaries, awards — every bullet rated and tagged). Import via JSON, or **seed from an existing resume** (paste text or upload PDF/DOCX/TXT → GPT parses it into the profile schema).
 
-### `match_results`
-```
-id                uuid        PK
-application_id    uuid        → applications
-user_id           uuid        → auth.users
-resume_id         uuid        → resumes
-resume_hash       text
-jd_hash           text        "v2" + SHA-256[0:30] of job_description
-score             integer     0–100
-score_breakdown   jsonb       { requiredScore, depthScore, preferredScore, experienceScore, educationScore }
-matched_skills    text[]
-missing_skills    text[]
-explanation       jsonb       { summary, bulletPoints, resumeRewrites, actionSteps }
-matched_at        timestamp
-```
+**2 — Tailor.** Paste a job description → **Generate with Claude** → Claude returns an honest fit assessment (0–100 `matchScore`, gaps, recommendation) plus **candidate bullet suggestions**. You **edit and approve** the bullets you want (placeholders like `[X]` are preserved), then **Send to Builder**.
 
-### `profiles`
-```
-id                uuid        PK (→ auth.users)
-theme_settings    jsonb
-display_name      text
-avatar_id         text
-created_at        timestamp
-```
+**3 — Assembly.** "Send to Builder" calls a server-side **assembly pass**: Claude treats every bullet across your Master Profile, your current resume, and your approved bullets as a candidate "block" and assembles the single best one-page resume — keeping, cutting, reordering, or replacing blocks. It is saved as a **new** Builder version (never overwriting a previous one), with the target JD attached.
 
-### `master_profile`
-```
-user_id           uuid        PK (→ auth.users)
-content           jsonb       full MasterProfile object (see shared/types.ts)
-updated_at        timestamptz
-```
-
-### `resume_builder`
-```
-id                uuid        PK
-user_id           uuid        → auth.users
-version_name      text
-content           jsonb       ResumeContent object
-settings          jsonb       ResumeSettings object
-source_resume_id  uuid?       → resumes (if imported from vault)
-created_at        timestamp
-updated_at        timestamp
-```
-
-All tables enforce **Row-Level Security** scoped to `user_id = auth.uid()`.
+**4 — Resume Builder.** A full live editor (drag-to-reorder sections, show/hide, inline `**bold**`/`*italic*`, fonts, typography, undo/redo, auto-save). The **match score follows your live content** (see below). **Re-rank** re-scores; **Re-assemble** re-optimizes into a new version. Export a text-native, ATS-safe PDF.
 
 ---
 
-## API Reference
+## Scoring model
 
-All endpoints require `Authorization: Bearer <supabase_access_token>` unless noted.
+The score is a **content-addressed function of the live, rendered resume** — not of a stale snapshot, and not of the raw JSON.
 
-### Applications
+- The resume is rendered to the **same ATS-visible plain text** the exported PDF exposes (`resumeContentToText`, shared with the PDF HTML path). That text is what gets **hashed** and **scored**, so the number you see matches what a recruiter's parser reads.
+- Scores are cached in **`resume_scores`**, keyed on `(user_id, jd_hash, content_hash)`:
+  - **Edit content → hash changes → cache miss → recompute** (auto, debounced ~3s after edits settle, when *Live score* is on).
+  - **Revert to identical content → cache hit → same score, no Claude call.** Score stability is free.
+- **`/rerank/claude` is the single live scorer.** **`/assemble/claude` primes the same store**, so a freshly assembled resume already shows its score with no extra call.
+- **Re-rank is pure scoring — it never mutates the resume.** Only **Re-assemble** produces new content (as a new version).
+- Builder versions carry their target `job_description`; a version without one shows scoring disabled with *"No target job description for this version."*
 
-| Method | Path | Description |
+> Tailoring scores live **only** in the Tailor/Builder flow. There is no score badge on the Applications tab.
+
+---
+
+## The LLM pipeline (all prompts)
+
+All five prompts are in `api/src/index.ts`.
+
+| Endpoint | Model | Role |
 |---|---|---|
-| GET | `/applications` | List all apps for the authenticated user |
-| POST | `/applications` | Create a new application |
-| PUT | `/applications/:id` | Update an application |
-| DELETE | `/applications/:id` | Delete an application |
-| POST | `/applications/auto-ghost` | Mark stale (90+ day inactive, non-terminal) apps as Ghosted |
-
-**Auto-ghost logic:** Queries all non-terminal apps where `last_updated < now - 90 days`. For each, appends `{ status: "Ghosted", ts: now, auto: true }` to `timeline`, sets `status = "Ghosted"` and `last_updated = now`.
-
-### Resumes
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/resumes` | List all resumes |
-| POST | `/resumes` | Upload new resume (base64 body) |
-| GET | `/resumes/:id/download` | Get 60-second signed download URL |
-| DELETE | `/resumes/:id` | Delete resume (file + DB row) |
-| POST | `/resumes/:id/parse` | Extract text, compute SHA-256 hash, cache in DB |
-| PATCH | `/resumes/:id/active` | Set this resume as active (unsets all others) |
-| PATCH | `/resumes/:id/replace` | Replace file content + extracted_text (used by Resume Builder save-to-vault) |
-| POST | `/resumes/:id/parse-for-builder` | GPT-4.1-mini converts extracted_text → structured ResumeContent |
-
-**Parse flow:** Downloads file from Supabase Storage → selects parser by MIME type (pdf-parse / mammoth / UTF-8 fallback) → normalizes whitespace (3+ newlines → 2, multiple spaces → 1) → validates ≥100 chars extracted → SHA-256 hash → stores in `extracted_text` and `resume_hash`.
-
-### Matching
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/match` | Run (or return cached) match for an application |
-| GET | `/match/:appId` | Fetch most recent match result |
-| DELETE | `/match/:appId` | Clear cached match result |
-
-**Match body:** `{ applicationId: string, resumeId?: string }` — omit `resumeId` to use active resume.
-
-**Cache key:** `(application_id, resume_id, jd_hash)` where `jd_hash = "v2" + SHA-256(job_description)[0:30]`.
-
-### Tailor
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/master-profile` | Fetch user's content library; upserts empty row on first call |
-| PUT | `/master-profile` | Save full MasterProfile JSON |
-| POST | `/tailor` | Generate tailored resume + Layer 1 score (pure JS, deterministic) |
-| POST | `/tailor/checkup` | Layer 1 score + Layer 2 Claude critique (on-demand) |
-
-**POST `/tailor` body:** `{ jobDescription: string, applicationId?: string }`
-
-**POST `/tailor` response:**
-```json
-{
-  "success": true,
-  "resumeContent": { /* ResumeContent */ },
-  "parsedJd": { "jobTitle": "...", "requiredSkills": [], "preferredSkills": [] },
-  "score": 78,
-  "scoreBreakdown": { "requiredScore": 32, "depthScore": 14, "preferredScore": 20, "experienceScore": 8, "educationScore": 4 },
-  "matchedSkills": ["python", "pytorch"],
-  "missingSkills": ["kubernetes"]
-}
-```
-
-**POST `/tailor/checkup` body:** `{ resumeContent: ResumeContent, jobDescription: string }`
-
-### Autofill
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/autofill` | Extract structured job data from URL + rendered page text |
-
-**Body:** `{ url: string, pageText?: string }` — `pageText` is `document.body.innerText` from the content script; avoids server-side fetch of auth-gated pages.
-
-### Summary (Mira AI)
-
-| Method | Path | Description |
-|---|---|---|
-| POST | `/summary` | GPT-4o-mini career assessment from full application list |
-
-**Body:** `{ apps: JobApplication[] }` — also fetches user's active resume server-side for context.
-
-### Profile
-
-| Method | Path | Description |
-|---|---|---|
-| GET | `/profile` | Get user profile |
-| PUT | `/profile` | Update display_name, avatar_id, theme_settings |
-| DELETE | `/profile` | Permanent account deletion (cascades all data + storage) |
+| `POST /autofill` | gpt-4o-mini | Job-posting page → structured fields (company, role, location, salary, JD text) |
+| `POST /summary` | gpt-4o-mini | "Mira" — warm-but-honest career assessment over your funnel + profile |
+| `POST /master-profile/seed-from-text` | gpt-4.1-mini | Raw resume text → MasterProfile JSON |
+| `POST /tailor/claude` | claude-sonnet-4-6 | Tailor from the Master Profile: pick content, write bullet suggestions, assess fit (cached in `tailor_results`) |
+| `POST /assemble/claude` | claude-sonnet-4-6 | Assemble the best one-page resume from profile + current resume + approved bullets; new version; primes the score store |
+| `POST /rerank/claude` | claude-sonnet-4-6 | Score the live rendered resume against the JD; content-addressed cache in `resume_scores` |
 
 ---
 
-## Pipeline: Hybrid Resume Matching
+## API reference
 
-**File:** `api/src/matcher.ts`
+All routes require `Authorization: Bearer <supabase-jwt>` (validated by `requireAuth`).
 
-```
-POST /match { applicationId, resumeId? }
-  │
-  ├─ Check match_results cache (application_id + resume_id + jd_hash)
-  │     └─ Cache HIT → return immediately
-  │
-  ├─ Load application.job_description + application.parsed_jd (if cached)
-  ├─ Load resume.extracted_text + resume.parsed_resume (if cached)
-  │
-  ├─ Step 1: parseJD(jdText)                [pure JS]
-  │   ├─ splitJDSections() → required text / preferred text / other
-  │   │   Uses REQUIRED_HEADINGS and PREFERRED_HEADINGS regex arrays
-  │   ├─ scanText(requiredText) → Set<canonicalSkill>
-  │   ├─ scanText(preferredText) → Set<canonicalSkill>
-  │   ├─ applyImpliedSkills() → expand via impliedBy rules
-  │   ├─ deduplicateImplied() → remove generic when specific is present
-  │   ├─ extractYearsRequired() → number | null
-  │   ├─ extractEducation() → high_school | bachelors | masters | phd | null
-  │   └─ detectGatekeepers() → string[] (work auth, clearance, on-site, etc.)
-  │
-  ├─ Step 2: parseResume(text)              [pure JS]
-  │   ├─ Split into sections: experience, skills, education, projects
-  │   ├─ scanText(experienceText) → skillsInContext (proven in bullets)
-  │   ├─ scanText(skillsText) → skillsListOnly
-  │   ├─ applyImpliedSkills() on union
-  │   ├─ extractYearsExperience() → from date ranges in experience section
-  │   └─ extractEducationLevel() → enum
-  │
-  ├─ Step 3: computeHybridScore(resume, jd) [pure JS, produces FINAL score]
-  │   ├─ Dynamic weight split between required/preferred based on JD composition:
-  │   │     If preferred/required ratio > 1.5 → shift 5pts from required to preferred
-  │   ├─ Required score (32–45 pts):
-  │   │     For each required skill: matched? → weight × (1.0 if inContext else 0.4) × maxPts/totalWeight
-  │   ├─ Depth score (0–20 pts):
-  │   │     For matched required skills: inContext = 1.0, listOnly = 0.4
-  │   │     Score = Σ(depth weights) / totalWeight × 20
-  │   ├─ Preferred score (15–28 pts):
-  │   │     Count-based match; scaled to dynamic max
-  │   ├─ Experience score (0–12 pts):
-  │   │     gap = |resume.yearsExperience - jd.yearsRequired|
-  │   │     score = 12 × exp(-0.6 × gap)
-  │   ├─ Education score (0–8 pts):
-  │   │     Rank comparison: high_school=1, bachelors=2, masters=3, phd=4
-  │   │     If resume >= required: 8 pts; else: partial decay
-  │   └─ label: Excellent ≥80, Strong 65–79, Good 50–64, Partial 35–49, Weak <35
-  │
-  ├─ Step 4: generateExplanation(...)       [GPT-4o-mini — narrative only]
-  │   ├─ Score is passed in as READ-ONLY (GPT cannot change it)
-  │   └─ Returns: { summary, bulletPoints, resumeRewrites, actionSteps }
-  │
-  └─ Cache result in match_results + cache parsed_jd/parsed_resume in their tables
-```
+**Applications**
+- `GET /applications` · `POST /applications` · `PUT /applications/:id` · `DELETE /applications/:id`
+- `POST /applications/auto-ghost` — marks 90-day-stale, non-terminal apps as Ghosted
 
-**Skill Dictionary** (`api/src/lib/skillDictionary.ts`):
-- 200+ entries, each `{ canonical, aliases[], impliedBy?[][], weight: 1|2|3 }`
-- `weight` 3 = gate skill (Python, SQL), 2 = standard, 1 = niche
-- `impliedBy`: OR of ANDs — if any AND-group is fully present, this skill is implied
-  - Example: `implied-by: [["pytorch", "tensorflow"]]` → if both present, implies "machine-learning"
-- `scanText(text)`: regex scan with word boundaries (case-insensitive, alias-aware)
-- `applyImpliedSkills(found)`: iterative expansion until convergence
-- `deduplicateImplied(skills)`: removes generic skills when their specific components are present
+**Profile & account**
+- `GET/PUT/DELETE /profile` — DELETE is a full account wipe (all tables + storage + auth)
+
+**Master Profile**
+- `GET/PUT /master-profile`
+- `POST /master-profile/seed-from-text` — resume text → profile JSON
+- `POST /parse-text` — extract text from uploaded PDF/DOCX/DOC/TXT
+
+**AI**
+- `POST /autofill` — URL or pre-extracted `pageText` → structured job fields
+- `POST /summary` — Mira career assessment
+- `POST /tailor/claude` — `{ jobDescription, applicationId? }` → `{ resumeContent, review }`
+- `POST /assemble/claude` — `{ jobDescription, approvedBullets[], currentResume?, company?, role? }` → `{ version, resumeContent, score, changeLog }`
+- `POST /rerank/claude` — `{ jobDescription, resumeContent }` → `{ review, score, contentHash, fromCache }`
+
+**Export**
+- `POST /export/pdf` — `{ content, settings }` → Puppeteer-rendered, text-native PDF (a `pdf-parse` regression guard asserts extractable keywords before responding)
 
 ---
 
-## Pipeline: Zenith Tailor (Resume Generation)
+## Database schema
 
-**Files:** `api/src/tailor/tailorResume.ts`, `api/src/tailor/resumeContentToText.ts`
+Supabase Postgres, RLS on every user-owned table.
 
-**Principle:** Select-only v1. The engine picks, orders, and shows/hides pre-written bullets from the MasterProfile library. No LLM in the generation path. Same JD + same library → identical `ResumeContent` always.
-
-### Master Profile Data Model
-
-```typescript
-MasterProfile {
-  header:      { name, title, phone, email, linkedin?, github?, portfolio? }
-  summaries:   SummaryVariant[]        // { id, text, tags[] } — multiple variants
-  experiences: LibraryExperience[]
-  projects:    LibraryProject[]
-  education:   LibraryEducation[]
-  skills:      LibrarySkill[]          // { canonical, display, category, proven }
-  awards:      LibraryAward[]
-}
-
-LibraryBullet {
-  id:       string
-  text:     string      // verbatim — copied as-is
-  skills:   string[]    // canonical Skill Dictionary keys
-  metric?:  string      // quantified impact e.g. "26%"
-  strength: 1 | 2 | 3  // 1=basic, 2=good, 3=flagship
-  tags:     string[]    // domain tags e.g. "genai", "nlp", "fullstack"
-}
-
-LibraryExperience {
-  id, org, role, location?, startDate, endDate|null, current: boolean
-  defaultInclude: boolean   // always include (e.g. current role)
-  tags: string[]
-  bullets: LibraryBullet[]  // POOL — engine picks subset
-}
-```
-
-### Selection Algorithm
-
-```
-POST /tailor { jobDescription, applicationId? }
-  │
-  ├─ Load master_profile.content for user
-  ├─ parseJD(jobDescription) → ParsedJD { requiredSkills, preferredSkills, yearsRequired, ... }
-  │
-  ├─ SCORE BULLETS
-  │   For each LibraryBullet:
-  │     expanded = applyImpliedSkills(Set(bullet.skills))
-  │     score = Σ skills:
-  │               required  → +getWeight(skill) × 3
-  │               preferred → +getWeight(skill) × 1.5
-  │               else      → +0.25
-  │           + (bullet.metric ? 1.5 : 0)
-  │           + (bullet.strength - 1)              // 0 / 1 / 2
-  │
-  ├─ SCORE ITEMS (experiences & projects)
-  │   itemScore = Σ(top-K bullet scores)           // K=4 exp, K=3 proj
-  │             + recencyBonus(endDate)             // 0–2, decays linearly over 4 years; current=2
-  │             + tagOverlap(item.tags, parsedJD)  // 0–3, capped
-  │
-  ├─ SELECT EXPERIENCES
-  │   1. Filter: require non-empty org OR role
-  │   2. Rank by itemScore DESC
-  │   3. Deduplicate by (org.toLowerCase(), role.toLowerCase())
-  │   4. Always include defaultInclude=true items
-  │   5. Fill remaining slots up to max 3 from top-ranked non-default
-  │
-  ├─ SELECT PROJECTS
-  │   1. Filter: require non-empty name
-  │   2. Top 3 by itemScore
-  │
-  ├─ ORDER SECTIONS
-  │   expRelevance  = Σ itemScores of selected experiences
-  │   projRelevance = Σ itemScores of selected projects
-  │   projectsFirst = projRelevance > expRelevance
-  │                   OR (tied AND JD text matches /startup|portfolio|ship|build|prototype/i)
-  │   Final order: Header → Summary → [Projects|Experience] → Education → Skills → Awards
-  │
-  ├─ SELECT BULLETS per item
-  │   1. Filter: non-empty text
-  │   2. Score all bullets
-  │   3. Take top-K (4/3/2 for exp/proj/edu)
-  │   4. Metric guarantee: if a metric bullet is outside top-K and selected.length > 0,
-  │      swap last selected bullet with the metric bullet
-  │   5. Prefix bullet IDs: `${itemId}-${bullet.id}` to guarantee uniqueness across sections
-  │
-  ├─ SELECT SUMMARY
-  │   Pick SummaryVariant with most tag overlap against JD text
-  │   Fallback: first variant
-  │
-  ├─ BUILD SKILLS SECTION
-  │   Group library skills by category, order:
-  │     1. Required skills (in parsedJD.requiredSkills)
-  │     2. Preferred skills
-  │     3. Remaining proven skills
-  │   Emit max 5 categories
-  │
-  ├─ ONE-PAGE BUDGET TRIM
-  │   estimateLines = 4 (header/summary) + sections × 1 (heading) + items × 1 (header) + bullets × 1
-  │   While lineCount > MAX_LINES (42):
-  │     Trim last bullet from item with most bullets (experience first, then projects)
-  │     Stop when cannot trim further (min 2 bullets per exp, 1 per proj)
-  │
-  └─ Return ResumeContent (existing shape → loads directly into Resume Builder)
-
-POST /tailor then runs Layer 1 check-up inline:
-  resumeContentToText(resumeContent) → plain text
-  parseResume(text) → ParsedResume
-  computeHybridScore(parsed, parsedJd) → score/100 + breakdown + matched/missing
-  Returns all of the above in one response.
-```
-
-### resumeContentToText
-
-Converts `ResumeContent` → plain text for scoring. Section-by-section:
-- Header: name, title, phone | email | linkedin | github | portfolio
-- Summary (if `showSummary`)
-- Experience/Education items: `org | role | location | date`, then `- bullet`
-- Projects: `name | techStack | dateRange`, then `- bullet`
-- Skills: `Category: item1, item2`
-- Custom: raw content
-- Strips `**bold**` → `bold`, `*italic*` → `italic`
-
-### Layer 2 Check-up (Claude)
-
-```
-POST /tailor/checkup { resumeContent, jobDescription }
-  │
-  ├─ Layer 1 (same as above) — always runs
-  │
-  └─ Layer 2 (if ANTHROPIC_API_KEY set)
-      Model: claude-sonnet-4-6
-      System prompt enforces:
-        - No made-up "ATS score" — judge keyword coverage, parseability, quantification density
-        - HONESTY: only suggest surfacing existing content; flag real gaps, never fill them
-      User message includes: JD text, resume plain text, Layer 1 score + matched/missing skills
-      Expected JSON response: { parseability, keywordCoverage, quantification, lengthFit, prioritizedChanges }
-      Defensive parsing: strip markdown fences before JSON.parse, try/catch → fallback object
-```
-
----
-
-## Pipeline: Resume Builder
-
-**Files:** `web/src/pages/ResumeBuilder.tsx`, `web/src/components/resume/ResumeBuilderLayout.tsx`, `web/src/hooks/useResumeData.ts`
-
-### Data Model
-
-```typescript
-ResumeContent {
-  header:      ResumeHeader          // name, title, phone, email, linkedin, github, portfolio
-  summary:     string                // supports **bold** and *italic* markdown
-  showSummary: boolean
-  sections:    ResumeSection[]
-}
-
-ResumeSection {
-  id:      string
-  type:    'education' | 'experience' | 'projects' | 'skills' | 'custom'
-  title:   string
-  visible: boolean
-  items:   ResumeSectionItem[]
-}
-
-ResumeSectionItem {
-  id:           string
-  // experience + education fields:
-  organization?: string
-  role?:         string
-  location?:     string
-  date?:         string
-  bullets?:      BulletItem[]
-  // project fields:
-  projectName?:  string
-  techStack?:    string
-  dateRange?:    string
-  // skills fields:
-  category?:     string
-  items?:        string       // comma-separated skill list
-  // custom:
-  content?:      string
-}
-```
-
-### useResumeData Hook
-
-```
-Mount:
-  → fetch resume_builder rows for user (ORDER BY updated_at DESC)
-  → if none: create default "My Resume" version with DEFAULT_RESUME_CONTENT
-  → set versions[], activeVersionId, content, settings
-  → loading = false
-
-setContent(newContent):
-  → dispatch SET action to reducer (pushes present → past[], clears future[])
-  → schedules debounced auto-save (1500ms)
-
-Auto-save:
-  → PATCH resume_builder SET content=..., settings=..., updated_at=now WHERE id=activeVersionId
-  → saveStatus: idle → saving → saved → idle (2s delay)
-
-Undo/Redo:
-  → past[]/future[] stacks, max 20 entries each
-  → UNDO: present→future[0], past[-1]→present
-  → REDO: future[0]→present, present→past[-1]
-
-importFromVault(content, sourceName, sourceId):
-  → createVersion(`Import: ${sourceName}`)
-  → setContent(content)
-  → sets sourceResumeId on the version
-
-saveToVault(previewEl: HTMLDivElement):
-  1. vaultSaveStatus = 'capturing'
-  2. html2canvas(previewEl, { scale: 2, useCORS: true })
-  3. canvas.toDataURL('image/jpeg', 0.95) → JPEG data URL
-  4. jsPDF(portrait, pt, [612, 792]) → addImage → output('blob')
-  5. FileReader → base64 string
-  6. contentToPlainText(content) → extracted text
-  7. vaultSaveStatus = 'uploading'
-  8. PATCH /resumes/:sourceResumeId/replace { fileData, extractedText }
-  9. vaultSaveStatus = 'done' → idle (3s)
-```
-
-### Tailor → Builder integration
-
-```
-TailorTab generates ResumeContent
-  → calls onOpenInBuilder(content, company?, role?)
-  → JobApplicationTracker sets tailoredContent state + setActiveTab("resume-builder")
-  → ResumeBuilder mounts with initialContent prop
-  → ResumeBuilderLayout useEffect fires after loading=false:
-      setContent(initialContent)
-      onInitialContentConsumed() → clears tailoredContent in parent
-```
-
-**Important:** `setContent` triggers auto-save, so the tailored resume is immediately written to Supabase under the currently active version. If the user doesn't want to overwrite their existing version, they should create a new version first (version management is in the toolbar).
-
-### Rendering Pipeline
-
-```
-ResumeBuilderLayout
-  ├─ ResumeToolbar (version picker, undo/redo, save status, print, save-to-vault)
-  ├─ EditorPanel (left, 380px fixed)
-  │   ├─ Content tab:
-  │   │   ├─ HeaderEditor (name, title, phone, email, linkedin, github, portfolio)
-  │   │   ├─ SummaryEditor (textarea with show/hide toggle)
-  │   │   └─ SectionList (DnD reorder via @dnd-kit)
-  │   │       └─ SortableCard per section → SectionEditor
-  │   │           ├─ type=experience/education → ExperienceItem (org, role, location, date, bullets)
-  │   │           ├─ type=projects → ProjectItem (projectName, techStack, dateRange, bullets)
-  │   │           ├─ type=skills → SkillsItem (category, items string)
-  │   │           └─ type=custom → textarea (raw content)
-  │   └─ Style tab: TypographyControls (font, size, spacing, margins, autoFit toggle)
-  └─ PreviewPanel (right, flex-1)
-      └─ ResumePreview (ref=printRef, 8.5in × 11in, print-ready)
-          ├─ PreviewHeader
-          ├─ Summary section (if showSummary)
-          └─ PreviewSection per section:
-              ├─ type=experience/education → PreviewExperience per item
-              │   Row 1: org (bold left) + date (bold right)   [only rendered if either non-empty]
-              │   Row 2: role (italic left) + location (right) [only rendered if either non-empty]
-              │   Bullets: <ul> disc list, renderInlineMarkdown() for **bold**/*italic*
-              ├─ type=projects → PreviewProject per item
-              │   Row: projectName (bold) | techStack (italic) + dateRange (bold right) [guarded]
-              │   Bullets: same as above
-              ├─ type=skills → PreviewSkills
-              │   Each item: "Category: item1, item2, ..."
-              └─ type=custom → dangerouslySetInnerHTML with renderInlineMarkdown()
-```
-
-### PDF Export
-
-```
-usePDFExport({ printRef, versionName }):
-  → html2canvas(printRef.current, { scale: 2, useCORS: true, logging: false })
-  → Convert canvas to jsPDF at 612×792pt (US Letter)
-  → addImage(canvas, 'JPEG', 0, 0, 612, 792)
-  → output('blob') → URL.createObjectURL → auto-click download link
-```
-
-### Resume Text Parser (`resumeTextParser.ts`)
-
-Used by the vault import flow to convert plain text → `ResumeContent` for the section classifier.
-
-```
-detectSections(text):
-  → Normalize: collapse 3+ blank lines → 2, trim trailing spaces
-  → Split lines; detect section headings via HEADING_PATTERNS regex (high/low confidence)
-  → Headings matched: experience, education, projects, skills, summary, certifications, awards, etc.
-  → Returns: { header: string, sections: { type, lines[] }[] }
-
-parseHeader(headerText):
-  → Email: /\S+@\S+\.\S+/
-  → Phone: international/US patterns
-  → LinkedIn: /linkedin\.com/
-  → GitHub: /github\.com/
-  → Name: first non-empty ≤40 char line, no @/digits, all-caps words allowed
-  → Title: first professional descriptor <120 chars, no dates
-
-parseExperienceSection(lines):
-  → Blank line = entry boundary
-  → Bullet lines (•-–—◦▪▸►): collected under current entry
-  → Date patterns trigger org/role assignment
-  → All-caps short lines = new org
-
-contentToPlainText(content):
-  → Renders header, summary, sections to plain text
-  → Bullets prefixed with •
-```
-
----
-
-## Pipeline: Autofill (Chrome Extension)
-
-```
-User visits job board page (LinkedIn, Indeed, Glassdoor, Greenhouse, Lever, Workday, Handshake)
-  │
-  ├─ content.js injected (matches manifest.json URL patterns)
-  ├─ Intercepts history.pushState for SPA navigation (LinkedIn, Indeed)
-  │   → 1500ms debounce before re-triggering extraction
-  │
-  ├─ Check chrome.storage.session cache (key = URL):
-  │   └─ CACHE HIT → render pre-filled form immediately, skip API call
-  │
-  ├─ Check duplicates: GET /applications → compare URL + company+position
-  │   └─ DUPLICATE → show warning badge, option to skip or save anyway
-  │
-  ├─ Show skeleton loading panel (bottom-right floating)
-  │
-  ├─ Send to background.js via chrome.runtime.sendMessage
-  │   └─ background.js → POST /autofill { url, pageText: body.innerText.slice(0, 15000) }
-  │
-  ├─ POST /autofill:
-  │   → GPT-4.1-mini prompt: extract company, position, location, salary, jobDescription
-  │   → If pageText not provided: fetch URL server-side (fallback, may fail on auth-gated pages)
-  │   → Returns: { company, position, location, salary, jobDescription }
-  │
-  ├─ Store result in chrome.storage.session (30 min TTL, max 30 entries, LRU eviction)
-  │
-  ├─ Render editable pre-filled form in floating panel
-  │
-  └─ User clicks Save → POST /applications → redirect to localhost:5173
-```
-
-**Keep-alive:** Background service worker pings itself every 20 seconds to prevent Chrome from terminating it during long autofill requests.
-
----
-
-## Frontend Architecture
-
-### State Management
-
-`JobApplicationTracker.tsx` is the root authenticated shell and owns all shared state. It passes data down via props and receives callbacks up. No Redux or Zustand.
-
-**State owned by JobApplicationTracker:**
-- `apps: JobApplication[]` — full list, fetched on mount
-- `activeTab: TabId` — current tab
-- `tailoredContent: ResumeContent | null` — set when Tailor generates a resume; consumed by ResumeBuilder on mount
-- `resumes: Resume[]` — loaded lazily when Files tab opens
-- `matchDialogApp`, `matchResult`, `matchLoading`, etc. — match dialog state
-- `displayName`, `theme`, profile data
-- `appScores: Record<string, number>` — score badge shown per application card
-
-**Tab system:**
-```typescript
-type TabId = "applications" | "files" | "analytics" | "resume-builder" | "tailor" | "profile"
-```
-Defined in `Sidebar.tsx`. `NAV_ITEMS` array drives the sidebar. Adding a new tab requires: (1) add to `TabId`, (2) add to `NAV_ITEMS`, (3) add conditional render in `JobApplicationTracker.tsx`.
-
-**Resume Builder** renders outside the padded content wrapper — it uses full-height flexbox directly. All other tabs render inside a `max-w-7xl mx-auto px-7 py-8` container.
-
-### Component Tree
-
-```
-App (supabase auth listener)
-  ├─ Login (Google OAuth)
-  └─ JobApplicationTracker (authenticated shell)
-      ├─ Sidebar (tab nav)
-      ├─ [resume-builder tab] ResumeBuilder → ResumeBuilderLayout
-      └─ [all other tabs] padded content wrapper
-          ├─ ApplicationsTab
-          │   ├─ Toolbar (search, filters, Kanban/table toggle)
-          │   ├─ Application cards or table rows (per app, shows score badge if matched)
-          │   ├─ AppFormModal (create/edit)
-          │   ├─ AppDetailModal (read + timeline)
-          │   ├─ DeleteConfirmDialog
-          │   └─ MatchDialog (resume selector → run match → MatchResult display)
-          ├─ FilesTab (upload, parse, download, delete, set-active per resume)
-          ├─ AnalyticsTab (6 KPI cards + 4 charts: bar, donut, source, funnel)
-          ├─ TailorTab
-          │   ├─ JD paste box + optional app dropdown
-          │   ├─ Generate button → POST /tailor → score panel + "Open in Builder" button
-          │   ├─ Check-up panel (score ring, breakdown bars, matched/missing chips)
-          │   ├─ Claude check-up button → POST /tailor/checkup → critique panel
-          │   └─ MasterProfileEditor (section-wise form + JSON import/export)
-          └─ ProfileTab (avatar, name, theme toggle, CSV export, delete account)
-```
-
-### Styling
-
-- Tailwind CSS with custom config
-- Dark mode via `.dark` class on `<html>`
-- CSS variables for `--background`, `--foreground`, `--primary`, etc.
-- Custom utilities: `.gradient-text`, `.glass`, `animate-slide-up`, `animate-glow-pulse`
-- Radix UI primitives (Dialog, Select, Dropdown, Tabs, Tooltip, etc.)
-
----
-
-## Chrome Extension Deep Dive
-
-### Architecture
-
-```
-content.js         → injected into job board pages; owns floating panel UI
-    ↕ chrome.runtime.sendMessage
-background.js      → service worker; owns all API calls, OAuth tokens, chrome.storage
-    ↕ chrome.runtime.sendMessage
-popup.js           → extension popup; sign-in UI + quick-add form
-```
-
-### Inline Panel States
-
-| State | Trigger |
+| Table | Purpose |
 |---|---|
-| Not signed in | No valid token in `chrome.storage.local` |
-| Not a job page | URL matched but no job content detected |
-| Loading | Extraction request in-flight (skeleton shimmer) |
-| Ready | Extraction complete — editable pre-filled form |
-| Already tracked | Duplicate detected — green badge, auto-dismiss 4s |
-| Saved | Job saved — green badge, auto-dismiss 2.2s |
-| Error | API call failed — message + retry button |
-
-### OAuth (PKCE Flow)
-
-```
-1. background.js calls chrome.identity.launchWebAuthFlow()
-2. Supabase OAuth URL with code_challenge (PKCE)
-3. User authenticates with Google
-4. Supabase redirects to chrome-extension://{id}/oauth.html?code=...
-5. background.js exchanges code for access_token + refresh_token
-6. Tokens stored in chrome.storage.local
-7. Auto-refresh triggered when expires_at < now + 5 minutes
-```
+| `applications` | Job applications per user — `job_description`, `timeline` (jsonb), `last_updated`, status |
+| `master_profile` | One row per user, `content` (jsonb MasterProfile) — **source of truth** |
+| `resume_builder` | Builder versions — `content`, `settings`, `version_name`, **`job_description`, `jd_hash`** |
+| `resume_scores` | Content-addressed scores — `jd_hash`, `content_hash`, `score`, `review`; `UNIQUE(user_id, jd_hash, content_hash)` |
+| `tailor_results` | Generation cache for `/tailor/claude`, keyed on `(user_id, jd_hash, profile_hash)` |
+| `profiles` | Display name, avatar, theme |
+| `resumes` + Storage bucket | **Legacy** (vault removed); only touched by the account-wipe cleanup |
 
 ---
 
-## Authentication & Security
+## Frontend architecture
 
-### Auth Middleware (`api/src/middleware/auth.ts`)
+Single-page React app. `JobApplicationTracker.tsx` is the authenticated shell — owns shared state, tab routing, and the assembly handoff. Tabs:
 
-```typescript
-requireAuth(req, res, next):
-  1. Extract Authorization header
-  2. Strip "Bearer " prefix
-  3. supabase.auth.getUser(token)   // uses admin client — validates server-side
-  4. 401 if error or no user
-  5. req.user = user; next()
-```
+- **Applications** — Kanban/table, Mira summary, search & filters, auto-ghost notice
+- **Master Information** — Master Profile form editor, JSON import/export, seed-from-resume
+- **Analytics** — KPI cards + Recharts charts
+- **Tailor** — JD → Claude generate → editable/approvable bullets → Send to Builder
+- **Resume Builder** (`resume/ResumeBuilderLayout.tsx`, `hooks/useResumeData.ts`) — live editor + preview, versions, undo/redo, debounced auto-save, **live score chip / Re-rank / Re-assemble**, LaTeX copy, PDF download
+- **Profile** — account settings, CSV export, theme, delete account
 
-### Supabase Clients (`api/src/lib/supabase.ts`)
-
-Two clients with different privilege levels:
-
-| Client | Key used | RLS | Used for |
-|---|---|---|---|
-| `supabase` (admin) | `SERVICE_ROLE_KEY` | Bypassed | `deleteUser`, auto-ghost bulk update, master_profile upserts |
-| `getAuthClient(token)` (per-request) | `ANON_KEY` + user JWT | Enforced | All user-scoped queries in route handlers |
-
-The service role key is **never** sent to the frontend or extension.
-
-### Row-Level Security
-
-Every table enforces `user_id = auth.uid()`. The pattern:
-```sql
-CREATE POLICY "user_scope" ON table_name USING (user_id = auth.uid());
-```
-
-`getAuthClient(authHeader)` creates a Supabase client that injects the user's JWT, so `auth.uid()` resolves correctly inside Supabase RLS evaluation.
-
-### Resume Storage
-
-Files are in a private Supabase Storage bucket. Download URLs are signed and expire after 60 seconds. Storage paths are user-scoped: `resumes/{userId}/{timestamp}_{fileName}`.
+Handoff from Tailor to Builder is server-driven: `/assemble/claude` writes the new version, and the Builder loads the newest version on mount.
 
 ---
 
-## Running Locally
+## Chrome extension
 
-### Prerequisites
+Manifest v3. A content script runs on LinkedIn job pages; the background worker POSTs to the API and opens the web app. Ports are hardcoded (`localhost:3000` API, `localhost:5173` web) — rebuild if they change. The extension makes no LLM calls of its own; it only hits `/autofill` and the applications routes.
 
-- Node.js 18+
-- npm 9+
-- A Supabase project with all tables created, RLS enabled, and a `resumes` storage bucket
-- An OpenAI API key
-- (Optional) An Anthropic API key for Claude check-up
+---
 
-### Supabase SQL migrations
-
-Run in the Supabase SQL editor:
-
-```sql
--- master_profile table (required for Tailor)
-create table master_profile (
-  user_id    uuid primary key references auth.users,
-  content    jsonb not null default '{}',
-  updated_at timestamptz default now()
-);
-alter table master_profile enable row level security;
-create policy "user_scope" on master_profile using (user_id = auth.uid());
-
--- resume_builder table (required for Resume Builder)
-create table resume_builder (
-  id              uuid primary key default gen_random_uuid(),
-  user_id         uuid references auth.users not null,
-  version_name    text not null default 'My Resume',
-  content         jsonb not null default '{}',
-  settings        jsonb not null default '{}',
-  source_resume_id uuid references resumes(id) on delete set null,
-  created_at      timestamptz default now(),
-  updated_at      timestamptz default now()
-);
-alter table resume_builder enable row level security;
-create policy "user_scope" on resume_builder using (user_id = auth.uid());
-```
-
-### Install & Run
+## Running locally
 
 ```bash
+# install (workspace root)
 npm install
-npm run dev:api    # Express on http://localhost:3000
-npm run dev:web    # Vite on http://localhost:5173
-```
 
-### Build Chrome Extension
+# frontend  → http://localhost:5173
+npm run dev:web
 
-```bash
+# backend   → http://localhost:3000
+npm run dev:api
+
+# build the Chrome extension
 npm run build:ext
-# Chrome → chrome://extensions → Enable developer mode → Load unpacked → select extension/dist/
+
+# lint everything
+npm run lint
 ```
+
+Load the extension via `chrome://extensions` → *Load unpacked* → the built `extension/` output.
 
 ---
 
-## Environment Variables
+## Environment variables
 
-### `api/.env`
+`api/.env`:
 
-```bash
-SUPABASE_URL=https://your-project.supabase.co
-SUPABASE_ANON_KEY=...
-SUPABASE_SERVICE_ROLE_KEY=...
-OPENAI_API_KEY2=...          # Must be OPENAI_API_KEY2 (not OPENAI_API_KEY)
-ANTHROPIC_API_KEY=...        # Optional — enables Claude check-up in /tailor/checkup
+```
+SUPABASE_URL=
+SUPABASE_ANON_KEY=
+SUPABASE_SERVICE_ROLE_KEY=
+OPENAI_API_KEY2=        # note: the key name is OPENAI_API_KEY2
+ANTHROPIC_API_KEY=      # used by /tailor, /assemble, /rerank
 PORT=3000
 ```
 
-### `web/.env`
+`web/.env`:
 
-```bash
-VITE_SUPABASE_URL=https://your-project.supabase.co
-VITE_SUPABASE_ANON_KEY=...
-VITE_API_URL=http://localhost:3000
 ```
-
-### Extension (`extension/src/background.js`)
-
-Credentials are hardcoded constants — update before building for a different environment:
-```javascript
-const SUPABASE_URL = 'https://your-project.supabase.co'
-const SUPABASE_ANON_KEY = '...'
-const API_URL = 'http://localhost:3000'
-const APP_URL = 'http://localhost:5173'
+VITE_SUPABASE_URL=
+VITE_SUPABASE_ANON_KEY=
+VITE_API_URL=http://localhost:3000
 ```
 
 ---
 
-## Known Edge Cases & Bug Surfaces
+## Database migrations
 
-### Matching Pipeline
+SQL lives in `api/migrations/`. Apply in the Supabase SQL editor (or via the CLI) for your project.
 
-- **`parseJD` section split failure:** If the JD has no recognizable `Required`/`Preferred` headings, `sectionSplitWorked = false` and the entire JD text is treated as required. This over-populates `requiredSkills` and inflates the score. Watch for `sectionSplitWorked` in the response.
-- **`extractYearsRequired` multiple matches:** If a JD has two year requirements (e.g., "2+ years overall, 5+ in ML"), only the last regex match is used. The most common value may be lost.
-- **`applyImpliedSkills` convergence:** The iterative expansion runs until stable. Circular implication rules (if any exist in the dictionary) would cause an infinite loop — currently not guarded.
-- **Match cache invalidation:** Cache is keyed on `jd_hash = "v2" + SHA-256(jobDescription)[0:30]`. If the job description changes by even one character, the cache misses and the full pipeline re-runs. This is intentional but expensive.
+- **`stage2_resume_scores.sql`** — creates the `resume_scores` table (content-addressed scores, per-user RLS) and adds `job_description` / `jd_hash` to `resume_builder`.
 
-### Tailor Pipeline
+> If the score table is missing, scoring still works (Claude is called each time) — caching just fails soft until the migration is applied.
 
-- **Empty master profile:** `POST /tailor` returns 400 if `lib.experiences` is missing or empty. The UI shows this as a gen error. Ensure at least one experience with `org` or `role` is filled.
-- **Bullet ID uniqueness:** Bullet IDs within a master profile must be unique per item. The editor assigns random IDs. If a user manually imports JSON with duplicate IDs (e.g., all bullets named `b1`, `b2`), the prefixing in `selectBullets` (`${itemId}-${bullet.id}`) prevents React key collisions, but if two items share the same `id` at the `LibraryExperience` level, the experience-level deduplication by org+role may behave unexpectedly.
-- **`defaultInclude` count:** There is no cap on how many `defaultInclude=true` experiences are selected. Five experiences all marked `defaultInclude=true` will all appear in the resume, potentially breaking the one-page budget. The trim loop only removes bullets, not entire items.
-- **One-page estimation is a heuristic:** `estimateLines` counts logical lines, not rendered pixels. The actual Resume Builder preview is the true arbiter. The builder includes a `PageOverflowWarning` component that fires when the rendered height exceeds 11 inches.
-- **`/tailor/checkup` has no `requireAuth`:** The route uses the middleware for DB access but the Anthropic call doesn't need auth. If called without auth, the Layer 1 score will still work (no DB needed) but Layer 2 is stateless — this is intentional.
+---
 
-### Resume Builder
+## Testing
 
-- **`setContent` overwrites current version:** When `tailoredContent` is injected via `useEffect` in `ResumeBuilderLayout`, it triggers auto-save and overwrites whatever was in the active version. Users who want to preserve their existing content should create a new version first.
-- **Auto-save race condition:** If the user edits content rapidly, multiple debounced saves may be in-flight. The last write wins, which is correct, but `saveStatus` may briefly flicker to `saved` before the next save starts.
-- **`html2canvas` CORS:** The PDF export uses `html2canvas` with `useCORS: true`. External assets (Google Fonts, avatar images) may fail to render if their CORS headers don't allow `null` origin. Self-hosted fonts are unaffected.
-- **DnD sortable key stability:** `SectionList` uses section `id` as the DnD key. If two sections share the same `id` (possible if imported from a Tailor-generated resume where section IDs are hardcoded to `experience`, `projects`, etc. and the user also had a manually-created section with the same ID), the sortable context will have duplicate keys, causing unpredictable drag behavior.
-- **Resume Builder Supabase table:** `resume_builder` must exist in the DB. If it doesn't, `useResumeData` will throw silently on mount and `loading` will never become `false`, leaving the builder in a permanent loading state.
+```bash
+npm run test          # all suites
+```
 
-### Extension
+- **web** — Vitest + Testing Library (`web/tests/**.test.tsx`) plus standalone `tsx` specs (`*.spec.ts`)
+- **api** — standalone `tsx` specs (`api/tests/*.spec.ts`) using `node:assert`, covering the normalization boundaries and the HTML/text render paths
 
-- **Port mismatch:** The extension hardcodes `API_URL = 'http://localhost:3000'` and the web app URL as `http://localhost:5173`. If either port changes, the extension must be rebuilt.
-- **Service worker keep-alive:** The 20-second self-ping prevents Chrome from terminating the background script. If the API call takes >30 seconds (very slow network), Chrome may still terminate the worker between pings. The autofill result would be lost.
-- **`chrome.storage.session` LRU eviction:** Cache is capped at 30 entries with LRU eviction. On heavy use (many tabs, many job pages), recently viewed but not recently accessed job pages may require a fresh API call on revisit.
-- **SPA navigation debounce:** LinkedIn and Indeed use `history.pushState` interception with a 1500ms debounce. If the user navigates very quickly between listings, the debounce may fire on the wrong URL.
+Typecheck: `npm run build --workspace=api` (tsc) and `npx tsc --noEmit` in `web/`.
 
-### Auth
+---
 
-- **Token expiry during long sessions:** The web app uses `supabase.auth.getSession()` on each API call, which auto-refreshes the token. If the user's session is stale and the refresh fails (e.g., Supabase offline), API calls return 401. The frontend doesn't currently handle token refresh failures gracefully — the user would need to reload.
-- **Extension token refresh:** Triggered when `expires_at < now + 5 minutes`. If the extension is inactive for >1 hour and the background worker is terminated, the token may be expired on the next action. The refresh happens lazily on next use, adding ~500ms latency to the first request.
+## Security
+
+- Every API route is gated by `requireAuth`, which validates the Supabase JWT and attaches `req.user`.
+- Two Supabase clients (`api/src/lib/supabase.ts`): a service-role client for cache/admin tables, and a per-request, JWT-scoped client so **Row-Level Security** applies to user-owned data. User-owned tables (`resume_scores`, `resume_builder`, `applications`, `master_profile`) enforce `auth.uid() = user_id`.
+- PDF export is text-native and ATS-safe; a `pdf-parse` regression guard asserts extractable keywords before the file is returned.
+- Account deletion cascades across all tables, storage, and auth.

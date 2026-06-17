@@ -1,378 +1,220 @@
-# Zenith — Job Tracker Executive Portal
-## Product Progress Log
+# Zenith — Job Tracker SaaS
+
+## Engineering Progress Log
+
+_Last rewritten: 2026-06-17. This document reflects the **current** state of the code after the "Remove vault + deterministic matcher; cache Claude tailor scores" work. The old deterministic scoring engine (`matcher.ts`, `computeHybridScore`, `/match`, `/score/master`) and the 5-resume vault are **gone** — if you see them referenced anywhere else, that doc is stale._
 
 ---
 
-## What the product is
+## 1. What the product is
 
-Zenith is a full-stack SaaS job search platform. The tagline "Executive Portal" reflects the intended positioning: not a scratchpad, but a professional command center that tracks every application through its full lifecycle, matches your resume against job descriptions with a deterministic scoring engine, and assembles a tailored one-page resume using Claude AI from your personal Master Profile — with a mandatory human-approval gate before anything reaches the Builder.
+Zenith is a full-stack job-search SaaS. The user maintains one **Master Profile** (their entire career history, every bullet they've ever written, rated and tagged). For any job description, **Claude** tailors a one-page resume from that profile, scores the fit honestly, and proposes ready-to-paste bullet suggestions. The user reviews, approves, and edits the result in a live Resume Builder, then exports an ATS-safe PDF.
 
----
+Two hard design rules govern everything:
 
-## Architecture Decision Record (2026-06-11) — Cleanup & Claude-score consolidation
-
-Repo-wide cleanup. Decisions now final:
-
-| Decision | Rule |
-|---|---|
-| **Vault fully removed** | All `/resumes` routes, FilesTab, VaultPickerModal, Import/Save-to-Vault in Builder — deleted. `resumes` table is legacy, touched only by account wipe |
-| **Deterministic scorer removed** | `matcher.ts`, `skillDictionary.ts`, `/match` routes, `/score/master` — deleted. Claude's `review.matchScore` is the only score |
-| **Claude scores are cached, never recomputed** | `tailor_results` table keyed on `(user_id, jd_hash, profile_hash)`. Same JD + unchanged Master Profile → stored result, no Claude call. Any change to JD or profile busts the cache via the hash |
-| **Badges read the cache in one batch** | `GET /scores/claude` maps every application's JD hash to its stored score — replaces the old per-app N+1 |
-| **Mira uses the Master Profile** | `/summary` previously read the active vault resume; now reads `master_profile` |
-| **`shared` workspace deleted** | Was never imported; types live in `web/src/lib/types.ts` and `web/src/types/resume.types.ts` |
-
-Match dialog removed from the Applications tab (its deterministic backend is gone); the score badge remains, fed by cached Claude scores.
+1. **The Master Profile is the single source of truth.** Claude may only select / cut / reorder / condense facts that already exist in it — never invent.
+2. **Claude is the sole tailoring _and_ scoring brain.** There is no deterministic scoring engine anymore. Every score is a Claude `matchScore` self-assessment.
 
 ---
 
-## Architecture Decision Record (2026-06-02)
+## 2. Monorepo layout
 
-The v1 deterministic selection engine (`tailorResume.ts`) has been removed from the tailoring path and replaced with Claude as the sole tailoring brain. Key decisions that are now final:
+npm workspaces, three packages:
 
-| Decision | Rule |
-|---|---|
-| **Master Profile is the ONLY content source** | Claude tailors exclusively from it; nothing is invented |
-| **Claude is the sole tailoring engine** | `tailorResume.ts` is dormant; never called |
-| **Deterministic score is a display metric only** | Never fed to Claude, never gates anything, never used to order or select |
-| **Mandatory approve gate** | Claude proposes → user reviews → user approves → Builder opens; not skippable |
-| **Files/Vault tab removed** | Replaced by Master Information tab; no more 5-resume vault in the UI |
-
----
-
-## Tab-by-Tab Breakdown
-
----
-
-### Applications Tab
-
-**What it does**
-
-The root view of the tracker. Shows all saved job applications as either a Kanban board (grouped by status) or a compact table, with real-time filtering by status, source, and free-text search across company/position/location.
-
-**Per-application data:**
-- Company, position, location, salary (free-text)
-- Date applied, source (LinkedIn / Handshake / Jobright / Glassdoor / Indeed / Interstride / Other)
-- Referral flag, job URL, full job description text, notes
-- Status (8 stages): Applied → Screening → Interview Scheduled → Interview Completed → Offer / Rejected / Ghosted / Withdrawn
-- Timeline: auto-logged history of every status change (manual + auto-ghost events)
-
-**Key behaviors:**
-- **Auto-ghost**: any application inactive for 90+ days that hasn't reached a terminal status is automatically marked Ghosted, with `auto: true` appended to the timeline
-- **Score badges**: each application card shows a score computed by `computeHybridScore` against the user's **Master Profile** text (previously scored against vault resumes; now always uses master profile). Pure JS, no LLM, runs on app load via `GET /score/master/:appId`.
-- **Mira AI summary**: a sidebar button sends all applications to GPT-4o-mini for a personalized career assessment — observations about your funnel performance, patterns, and actionable next steps
-
-**Chrome extension handoff:** The extension's "Save" button POSTs to `/applications` and redirects the browser to the web app. The saved job appears immediately in this tab.
-
-**Status: Complete and stable. Score badges now use Master Profile as the scoring source.**
-
----
-
-### Master Information Tab *(formerly "Files / Resume Vault")*
-
-**What it does**
-
-Houses the Master Profile — the single source of truth for all tailored resume content. Replaces the old Files/Resume Vault tab. The 5-resume vault is gone from the UI.
-
-#### Master Profile Library
-
-A full-page always-expanded form editor. Every bullet you've ever written lives here, rated and tagged. Claude selects from this at tailoring time.
-
-**Sections:**
-- **Header**: name, title, phone, email, LinkedIn, GitHub, portfolio
-- **Summaries**: multiple text variants with domain tags
-- **Experiences**: org, role, location, start/end date, current toggle, always-include toggle, domain tags, and a pool of `LibraryBullet` objects
-- **Projects**: name, tech stack, dates, domain tags, bullet pool
-- **Education**: institution, degree, field, dates, GPA, always-include toggle
-- **Skills**: canonical key, display name, category, proven flag
-- **Awards**: title, issuer, date
-
-**Per-bullet metadata:**
-- `text`: the verbatim bullet sentence
-- `skills[]`: canonical skill keys from the Skill Dictionary
-- `metric?`: quantified impact string (e.g., "26%")
-- `strength`: 1 / 2 / 3
-- `tags[]`: domain tags
-
-**JSON import/export:** A "JSON" button opens an inline panel for pasting a full `MasterProfile` JSON or exporting the current library. Import sanitizes all bullet texts on load.
-
-**Data hygiene:** Bullet `onChange` replaces `\n` with space in real time. On load and JSON import, `sanitizeProfileBullets()` recursively cleans all `text` fields.
-
-#### Seed from Existing Resume *(new)*
-
-A collapsible panel at the top of the tab. Allows bootstrapping the Master Profile without hand-typing everything:
-
-1. Paste resume text **or** upload a PDF/DOCX/TXT file
-2. For file uploads, `POST /parse-text` extracts the text server-side (pdf-parse / mammoth)
-3. `POST /master-profile/seed-from-text` sends the text to GPT-4.1-mini with a detailed MasterProfile JSON schema prompt
-4. The parsed profile pre-fills the editor below — user reviews, enriches, and saves
-
-**Status: Complete and stable.**
-
----
-
-### Analytics Tab
-
-**What it does**
-
-Performance metrics and charts across all tracked applications.
-
-**Metric cards (6):**
-- Response Rate, Avg Response Time, Screening Rate, Interview Rate, Offer Rate, Median Offer Salary
-
-All counters animate on load via `useCountUp` (800ms).
-
-**Charts (4):**
-- Monthly application volume (bar + running average overlay)
-- Status distribution (donut)
-- Application source breakdown (bar)
-- Application funnel (conversion rates)
-
-**Status: Complete and stable.**
-
----
-
-### Resume Builder Tab
-
-**What it does**
-
-A full in-browser resume editor with live preview, version management, and export.
-
-**Sections:** Header, Summary, Experience, Education, Projects, Skills, Custom
-
-**Features:**
-- Drag-to-reorder sections (`@dnd-kit`)
-- Show/hide individual sections
-- Add/remove/reorder bullet points
-- Inline markdown: `**bold**`, `*italic*`
-- 11 font choices
-- Typography controls (size, spacing, margins, header alignment)
-- Auto-fit one-page toggle
-- Undo/redo (20 steps)
-- Debounced auto-save to Supabase (1.5s)
-- Named version management
-
-**Tailor handoff:** When the user approves in the Tailor tab, `ResumeContent` is written to `localStorage` under `jt.pending_tailor` before tab switch. `useResumeData.fetchVersions` reads and atomically clears it on mount.
-
-**Download PDF:** `POST /export/pdf` → Puppeteer server-side → text-native PDF with embedded TrueType fonts. ATS can extract and search the text.
-
-**Regression guard:** pdf-parse re-extracts text from the generated PDF; asserts ≥5 known keywords are present; returns 500 if assertion fails.
-
-**Status: Complete and stable.**
-
----
-
-### Tailor Tab *(fully restructured — Claude-only flow)*
-
-**What it does**
-
-Paste a job description → Claude assembles a tailored one-page resume from your Master Profile → you review the proposal → you approve → it opens in the Resume Builder. Claude is the sole brain; no deterministic selection engine in this path.
-
----
-
-#### Input Panel
-
-- **Job Description textarea**: paste the full JD
-- **Pull from saved application (optional)**: dropdown of apps that have a saved JD; selecting one pre-fills the textarea and records the `applicationId` for the post-approve link step
-
----
-
-#### Claude Section
-
-After clicking **"Generate with Claude AI"**, the right panel shows:
-
-**Score Ring (read-only display metric)**
-- Labeled "Display metric — not used by Claude"
-- Computed after Claude returns: `resumeContentToText(resumeContent)` → `parseResume` → `computeHybridScore` vs `parseJD`
-- Score is locked here; it is never sent to Claude and never used to select, order, or gate anything
-- Breakdown bars: Required skills / Depth of evidence / Preferred skills / Experience / Education
-
-**Claude's Review**
-- `summary`: 1–2 sentence narrative of tailoring decisions
-- `keptItems`: experiences/projects Claude selected and why
-- `droppedItems`: what was excluded and why
-- `skillsSurfaced`: skills surfaced from the profile for this JD
-- `suggestions`: honest observations about real gaps or improvements
-
----
-
-#### Mandatory Approve Gate
-
-The **"Approve & Open in Builder"** button is the only way to proceed. It cannot be bypassed.
-
-On click:
-1. Writes `resumeContent` to `localStorage["jt.pending_tailor"]`
-2. Sets `approved = true`
-3. Shows the post-approve app-link panel (see below)
-4. An "Open in Builder" button appears to trigger the tab switch
-
----
-
-#### Post-Approve: Create / Link Application *(Task 4)*
-
-After approving, a panel offers to associate the tailored resume with an application entry:
-
-- **If a saved app was linked (via dropdown):** "Link to Existing Application" — updates the application's notes field with a timestamp
-- **If JD was pasted manually:** "Create an Application" — form with Company + Role fields → calls `POST /applications` with the JD text stored as `job_description`
-- **Skip** dismisses the panel
-
----
-
-#### Claude Tailoring Endpoint (`POST /tailor/claude`)
-
-```
-1. Load MasterProfile from master_profile table — the ONLY allowed content source
-2. Call claude-sonnet-4-6 with:
-   - System prompt: full MasterProfile JSON embedded; HARD RULES stated explicitly:
-       a. Select, cut, reorder, condense, write summary — ONLY from Master Profile facts
-       b. NEVER invent, embellish, or add any skill/metric/tool/title/experience not present
-       c. Do NOT optimize toward any numeric score
-       d. One-page output: max 4 bullets/exp, 3/proj
-   - User message: the JD
-3. Defensive JSON parse (strip code fences, regex fallback, try/catch)
-4. After Claude returns resumeContent:
-   parseJD(jd) → parseResume(resumeContentToText(resumeContent)) → computeHybridScore
-   → return as { score, scoreBreakdown } alongside resumeContent + review (display only)
-```
-
-Returns: `{ resumeContent, review: { summary, keptItems, droppedItems, skillsSurfaced, suggestions }, score, scoreBreakdown }`
-
-**`POST /tailor` (old deterministic endpoint)**: returns 410 Gone. `tailorResume.ts` is dormant.
-**`POST /tailor/checkup`**: removed. Its functionality is folded into the Claude review above.
-
----
-
-**Status: Claude-only flow complete. Approve gate is mandatory. Score is display-only.**
-
----
-
-### Profile Tab
-
-**What it does**
-
-Account management, preferences, and data export.
-
-- Avatar + display name editor
-- Stats: total applications, days active
-- Theme toggle: light / dark (persisted to localStorage + Supabase)
-- CSV export
-- Logout
-- Delete account (two-step): cascades across all tables and Storage
-
-**Status: Complete and stable.**
-
----
-
-## Infrastructure & Cross-Cutting
-
-### Chrome Extension
-
-Manifest V3 extension. Injects a floating panel on supported job boards. **Left as-is in the v2 restructure.**
-
-- Autofill via `POST /autofill` (GPT-4.1-mini extracts structured fields)
-- Session cache in `chrome.storage.session` (30-min TTL, LRU eviction)
-- SPA navigation interception with 1.5s debounce
-- Background service worker self-ping (keep-alive)
-- PKCE OAuth via `chrome.identity.launchWebAuthFlow`
-
-**Status: Complete and stable. Port mismatch note: extension hardcodes API at 3000, web at 5173.**
-
----
-
-### Matching Pipeline
-
-Four-step hybrid pipeline in `api/src/matcher.ts`:
-
-1. `parseJD(jdText)` — pure JS regex + Skill Dictionary → `ParsedJD`
-2. `parseResume(text)` — pure JS section-aware parsing → `ParsedResume`
-3. `computeHybridScore(resume, jd)` — 5-component weighted scorer (0–100); deterministic and locked
-4. `generateExplanation(...)` — GPT-4o-mini writes narrative from the locked score
-
-This pipeline is now used in two places:
-- **Match dialog** (`POST /match`): scores against vault resume (legacy; vault UI removed but backend route kept)
-- **Badge scoring** (`GET /score/master/:appId`): scores app JD against Master Profile text — the live path
-
-**Status: Complete and stable.**
-
----
-
-### PDF Export Pipeline
-
-`POST /export/pdf { content, settings }`:
-1. `resumeContentToHtml(content, settings)` → self-contained HTML
-2. Puppeteer + bundled Chromium → `page.pdf({ format: 'Letter' })`
-3. pdf-parse regression guard: asserts ≥5 known keywords present; returns 500 on failure
-
-PDF output: `CIDFontType2` (TrueType-based) with `/ToUnicode` entries. Verified ATS-extractable via `pdftotext`.
-
-**Status: Complete and stable.**
-
----
-
-## Known Gaps / Next Up
-
-| Area | Gap | Priority |
+| Package | Role | Runtime |
 |---|---|---|
-| Builder | Verify all 6 rendering checks (bullet split, lowercase start, header slot contamination, edu isolation, empty skill labels) on a live Claude-tailored resume | High |
-| Tailor | Save tailored PDF to vault (or attach JSON to application) with auto-label | High |
-| Matching | Match dialog still references vault resume flow — works for existing cached results, but "Run Match" now uses master profile score (no narrative/rewrites for new runs) | Medium |
-| Extension | Port mismatch: hardcoded 3000/5173 — rebuild needed if ports change | Medium |
-| Tailor | Live check-up score updating as user edits in Builder | Low |
-| Auth | Token refresh failure not handled gracefully (user must reload) | Low |
-| Builder | DnD section-ID collision if manually-created section shares ID with tailor output | Low |
-| Matching | `extractYearsRequired` takes only last regex match — multi-requirement JDs may lose data | Low |
-| PDF | `html2canvas` still present in `web/package.json` as a dependency — safe to remove | Low |
+| `web/` | React + Vite SPA (port 5173) | `npm run dev:web` |
+| `api/` | Express + TypeScript (port 3000), `tsx watch` | `npm run dev:api` |
+| `extension/` | Manifest v3 Chrome extension (LinkedIn autofill) | `npm run build:ext` |
+
+**Every LLM prompt in the entire product lives in one file: `api/src/index.ts`.** The web app and the extension contain no prompts — they only call the API endpoints below.
 
 ---
 
-## File Map (key files only)
+## 3. The LLM pipeline — all five prompts
 
-```
-api/src/
-  index.ts                    All Express routes (30+)
-  matcher.ts                  Hybrid matching pipeline (parseJD, parseResume, score, explain)
-  middleware/auth.ts          requireAuth JWT guard
-  lib/supabase.ts             Admin client + per-request RLS-scoped client
-  lib/skillDictionary.ts      200+ skills with aliases, weights, implication rules
-  tailor/
-    tailorResume.ts           DORMANT — pure-JS selection engine (not called in v2)
-    resumeContentToText.ts    ResumeContent → plain text (used for badge scoring)
-  export/
-    resumeToHtml.ts           ResumeContent + settings → self-contained HTML
-    pdfExport.ts              Puppeteer wrapper + regression guard
+There are exactly **five** LLM calls. Three use OpenAI (utility parsing), two use Claude (the core resume brain).
 
-web/src/
-  components/
-    JobApplicationTracker.tsx Root authenticated shell (owns all shared state)
-    layout/Sidebar.tsx        Tab nav, TabId type (master-info replaces files)
-    tabs/
-      ApplicationsTab.tsx     Kanban/table view, match score badges, Mira
-      MasterInfoTab.tsx       Master Profile editor + seed-from-resume (replaces FilesTab)
-      MasterProfileEditor.tsx Section-wise form + JSON import/export (alwaysOpen / seedProfile props)
-      AnalyticsTab.tsx        KPI cards + 4 Recharts charts
-      TailorTab.tsx           JD input → Claude generate → approve gate → Builder handoff
-      ProfileTab.tsx          Account settings, export, delete
-    resume/
-      ResumeBuilderLayout.tsx Orchestrates editor + preview
-      editor/                 EditorPanel, SectionList, ExperienceItem, ProjectItem, etc.
-      preview/                ResumePreview, PreviewExperience, PreviewProject, PreviewSkills
-      export/generatePDF.ts   Client-side hook that calls POST /export/pdf
-  hooks/
-    useResumeData.ts          Resume builder state, versions, undo/redo, auto-save, tailor handoff
-    useAutoFit.ts             Auto-adjust typography to fit one page
-  pages/ResumeBuilder.tsx     Thin wrapper around ResumeBuilderLayout
+| # | Endpoint | File / lines | Model | Role |
+|---|---|---|---|---|
+| 1 | `POST /autofill` | `api/src/index.ts:295–314` | gpt-4o-mini | Job posting page → structured fields |
+| 2 | `POST /summary` | `api/src/index.ts:437–465` | gpt-4o-mini | "Mira" career assessment |
+| 3 | `POST /master-profile/seed-from-text` | `api/src/index.ts:524–559` | gpt-4.1-mini | Raw resume text → MasterProfile JSON |
+| 4 | `POST /tailor/claude` | `api/src/index.ts:680–805` | claude-sonnet-4-6 | **Tailor: select content, write bullets, score** |
+| 5 | `POST /rerank/claude` | `api/src/index.ts:919–964` | claude-sonnet-4-6 | **Re-rank: score the edited Builder resume** |
 
-shared/types.ts               ApplicationStatus, JobImportPayload, MasterProfile + Library* types
-```
+### 3.1 `POST /autofill` — gpt-4o-mini (`index.ts:295`)
+
+Fetches a job posting URL (or accepts pre-extracted `pageText` from the extension), strips HTML, and extracts structured fields. `temperature: 0`.
+
+> You are a job posting parser. Extract structured data from the page text below.
+> Return ONLY valid JSON with exactly these fields (use null if not found): `company`, `position`, `location`, `salary`, `jobDescription` (copy the FULL job-description text exactly, no summarizing).
+
+### 3.2 `POST /summary` — gpt-4o-mini (Mira) (`index.ts:437`)
+
+Reads all of the user's applications + the Master Profile (server-side) and writes a warm-but-honest career assessment. `temperature: 0.2`.
+
+- **System:** "You are Mira, a warm and empathetic AI career assistant who gives honest, grounded feedback… You speak plainly, avoid bullet points, and never use em dashes."
+- **User prompt** injects funnel stats and `masterProfileToText(lib)`. Flags weekly application rate < 15, identifies skill gaps vs. applied roles, 6–10 plain-sentence lines.
+
+### 3.3 `POST /master-profile/seed-from-text` — gpt-4.1-mini (`index.ts:524`)
+
+Bootstraps a Master Profile from pasted/uploaded resume text (file uploads first go through `POST /parse-text` → pdf-parse / mammoth). `temperature: 0`, `response_format: json_object`.
+
+- **System:** "You are a precise resume parser. Extract structured data from resume text and return ONLY valid JSON…"
+- **User prompt** specifies the exact MasterProfile schema: `header`, `summaries`, `experiences` (with `bullets[] = {id, text, skills[], strength, tags[]}`), `projects`, `education`, `skills` (`{display, canonical, category, proven}`), `awards`.
+
+### 3.4 `POST /tailor/claude` — claude-sonnet-4-6 (`index.ts:623`) ⭐ THE CORE
+
+This is the prompt that **decides what stays in the resume and writes the bullets**. Full Master Profile JSON is embedded in the system prompt. `max_tokens: 6000`.
+
+**System prompt (verbatim key rules, `index.ts:680`):**
+
+> You are a professional resume tailor. Your ONLY data source is the candidate's Master Profile below.
+> **MASTER PROFILE (your sole source of truth):** `<full profile JSON>`
+> **HARD RULES — non-negotiable:**
+> 1. You may SELECT, CUT, REORDER, CONDENSE bullets, and WRITE a tailored professional summary.
+> 2. You must ONLY use facts present in the Master Profile. NEVER invent, embellish, or add any skill, metric, tool, title, experience, or project that is not explicitly present.
+> 3. Do NOT optimize toward any numeric match score. Focus on honest, relevant presentation.
+> 4. Produce a ONE-PAGE resume: be selective. Max 4 bullets per experience, max 3 per project.
+> 5. Return ONLY valid JSON — no markdown fences, no explanation, no preamble.
+
+It then requires an **HONEST FIT ASSESSMENT** (no inflation), enforces **SCOPING** (`genuineGaps` = what the candidate lacks vs. `suggestions` = how to strengthen what they have, must never overlap), and the **ACTIONABLE BULLETS** contract: for every suggestion, emit a `bulletSuggestions` entry `{ section, target, guidance, bullet }` grounded in real profile facts, using `[X]` placeholders for missing metrics.
+
+**Output JSON:** `{ resumeContent: {header, summary, showSummary, sections[]}, review: {summary, keptItems, droppedItems, skillsSurfaced, suggestions, bulletSuggestions, fitAssessment{level,rationale}, recommendation, genuineGaps, matchScore} }`.
+
+**User message:** just the JD (`jobDescription.slice(0, 6000)`).
+
+### 3.5 `POST /rerank/claude` — claude-sonnet-4-6 (`index.ts:900`)
+
+Scores the resume **exactly as written in the Builder** (after the user's edits), instead of regenerating from the Master Profile. `max_tokens: 2000`.
+
+**System prompt (verbatim, `index.ts:919`):**
+
+> You are an honest, rigorous resume evaluator. You are given a candidate's CURRENT resume (already written and edited by them) and a target job description. Score how well THIS resume — exactly as written — matches the job description.
+> **HARD RULES:** Judge ONLY what is present; do NOT inflate; return ONLY valid JSON.
+
+Same `bulletSuggestions` + `matchScore` contract as the tailor prompt, but grounded in the Builder content rather than the profile. **User message** carries both the JD and `JSON.stringify(resumeContent)`.
 
 ---
 
-## Supabase Tables
+## 4. The scoring & caching mechanism — and why bullet edits don't move the score
+
+This is the most important thing to understand about the current system, and the source of the active complaint.
+
+### 4.1 The hash keys (`index.ts:24–26`)
+
+```ts
+const sha         = (s) => crypto.createHash('sha256').update(s).digest('hex').slice(0, 32);
+const hashJD      = (jd)  => sha(jd.replace(/\s+/g, ' ').trim().toLowerCase());
+const hashProfile = (lib) => sha(JSON.stringify(lib ?? {}));   // ⚠ hashes the MASTER PROFILE only
+```
+
+### 4.2 Tailor caching (`index.ts:646–668, 862–876`)
+
+`/tailor/claude` is cached in the `tailor_results` table keyed on **`(user_id, jd_hash, profile_hash)`**. Same JD + unchanged Master Profile → the stored result is returned with no Claude call. The score is persisted at `tailor_results.score = review.matchScore` and **never recomputed** for that key.
+
+### 4.3 The badge (`index.ts:1026–1064`)
+
+`GET /scores/claude` returns one score per application by matching each app's `hashJD(job_description)` against the newest `tailor_results` row. The Applications-tab badge shows **only this cached tailor score.**
+
+### 4.4 The three scores, and the disconnect
+
+There are **three different "scores" in the product**, and they are not the same number:
+
+| Score | Computed from | Where shown | Updates when you edit bullets? |
+|---|---|---|---|
+| **Badge score** (`tailor_results.score`) | Master Profile (via `/tailor/claude`) | Applications tab badge | ❌ **Never** |
+| **Tailor result score** (`result.review.matchScore`) | Master Profile (via `/tailor/claude`) | Tailor tab, after Generate | ❌ Never (frozen at generate time) |
+| **Re-rank score** (`rerank.review.matchScore`) | The **edited Builder resume** (via `/rerank/claude`) | Tailor tab only, transient | ✅ Yes — but only on manual click |
+
+**Why editing bullets in the Builder produces no score change:**
+
+1. **Different data store.** Builder edits write to the `resume_builder` table (`useResumeData.ts:196–211, 220–226`), debounced 1.5s. The Master Profile is untouched.
+2. **Cache never busts.** `profile_hash` hashes the **Master Profile only** (`index.ts:26`). Editing Builder bullets doesn't change the profile, so `(user_id, jd_hash, profile_hash)` stays identical and the cached badge/tailor score is frozen forever.
+3. **Re-rank is the only path that reflects edits — and it's hidden.** `/rerank/claude` does score the live Builder content, but:
+   - It only fires when the user clicks the "Re-rank" button in the Builder toolbar (`JobApplicationTracker.tsx:321–336` → `ResumeToolbar.tsx:109–117`).
+   - Its result is shown over in the **Tailor tab** as transient React state (`TailorTab.tsx:362–365, 583`), not in the Builder where the editing happens.
+   - It is **never written back** to `tailor_results` or the badge — `/rerank/claude` returns `{ review }` only, no DB write (`index.ts:1014`).
+
+**Net effect for the user:** they edit bullets, watch the badge / generate score, and nothing ever changes — because that score is a frozen function of the Master Profile, not of what they're editing.
+
+### 4.5 The bullet-suggestion → Builder handoff (`web/src/lib/bulletSuggestions.ts`)
+
+Claude's `bulletSuggestions` (from tailor or rerank) are sent to the Builder via a localStorage queue:
+
+- **Queue side (Tailor tab):** `queueBullets()` writes to `localStorage["jt.pending_bullets"]` and fires a `jt:bullets` event (`bulletSuggestions.ts:35–43`).
+- **Apply side (Builder):** `useResumeData` drains the queue on mount and on the live event (`useResumeData.ts:127–143, 236+`), then `applyBulletsToContent()` inserts each line.
+- **Targeting bug worth noting:** `pickItemIndex` (`bulletSuggestions.ts:74–86`) tries to match the suggestion's `target` against an item's org/role/project, but **falls back to index `0`** when there's no match — so a bullet can land under the wrong job/project silently. Insertion is append-only with no preview, diff, or undo of an individual applied suggestion.
+
+---
+
+## 5. Backend (`api/`)
+
+Express + TypeScript, run via `tsx watch`. Two Supabase clients in `lib/supabase.ts`:
+
+- `supabase` — service-role client (cache tables, admin ops).
+- `getAuthClient(token)` — per-request client using the user's JWT so RLS applies.
+
+All routes go through `requireAuth` (`middleware/auth.ts`), which validates the Bearer token via `supabase.auth.getUser()` and attaches `req.user`.
+
+**Route groups (`src/index.ts`):**
+- `/applications` — CRUD + `/applications/auto-ghost` (90-day-stale → Ghosted).
+- `/profile` — GET/PUT/DELETE (DELETE = full account wipe across all tables + storage + auth).
+- `/autofill` — prompt #1.
+- `/summary` — prompt #2 (Mira).
+- `/master-profile` — GET/PUT + `/seed-from-text` (prompt #3) + `/parse-text` (PDF/DOCX/DOC/TXT extraction).
+- `/tailor/claude` — prompt #4, cached.
+- `/rerank/claude` — prompt #5, **not** cached.
+- `/scores/claude` — batch badge scores from `tailor_results` (no N+1).
+- `/export/pdf` — Puppeteer renders `resumeContentToHtml` to a text-native ATS-safe PDF; a pdf-parse regression guard asserts extractable keywords (≥5) before responding.
+
+---
+
+## 6. Frontend (`web/`)
+
+Single-page React app. `JobApplicationTracker.tsx` is the authenticated shell that owns shared state, tab routing, the score-loading (`loadCachedScores` → `/scores/claude`), and the re-rank handler (`handleRerank` → `/rerank/claude`). It passes the Supabase JWT as `Authorization: Bearer <token>` on every fetch.
+
+**Tabs:**
+- **Applications** (`tabs/ApplicationsTab.tsx`) — Kanban/table, cached score badges, Mira summary.
+- **Master Information** (`tabs/MasterInfoTab.tsx` + `MasterProfileEditor.tsx`) — Master Profile form editor, JSON import/export, seed-from-resume.
+- **Analytics** (`tabs/AnalyticsTab.tsx`) — KPI cards + recharts.
+- **Tailor** (`tabs/TailorTab.tsx`) — JD input → Claude generate → review + **mandatory approve gate** → Builder handoff. Also displays the transient re-rank result.
+- **Resume Builder** (`resume/ResumeBuilderLayout.tsx`, `hooks/useResumeData.ts`) — live editor + preview, versions, undo/redo, debounced auto-save to `resume_builder`, LaTeX copy, server-side PDF download, the Re-rank button.
+- **Profile** (`tabs/ProfileTab.tsx`) — account settings, CSV export, theme, delete account.
+
+**Handoffs (localStorage as the single source of truth across tab switches):**
+- `jt.pending_tailor` — approved `ResumeContent`, consumed atomically by `useResumeData.fetchVersions` on Builder mount.
+- `jt.pending_bullets` — queued bullet suggestions (see §4.5).
+
+---
+
+## 7. Chrome extension (`extension/`)
+
+Manifest v3. Content script runs on LinkedIn job pages; background worker POSTs to the API at `localhost:3000` and opens the web app at `localhost:5173` (**both hardcoded** — rebuild if ports change). No LLM calls of its own; it only hits `/autofill` and the applications routes.
+
+---
+
+## 8. Supabase tables (current)
 
 | Table | Purpose |
 |---|---|
-| `applications` | Job applications per user; includes `job_description`, `parsed_jd` (jsonb cache) |
-| `resumes` | Vault resume metadata + `extracted_text` + `parsed_resume` (jsonb) — backend routes kept; vault UI removed |
-| `master_profile` | Single row per user with `content` (jsonb MasterProfile) — the source of truth for tailoring |
-| `profiles` | Display name, avatar, theme settings |
-| `match_results` | Cached match outputs keyed on `(application_id, resume_id, jd_hash)` — legacy; badges now use master profile scoring |
+| `applications` | Job applications per user; `job_description`, `timeline` (jsonb), `last_updated` |
+| `master_profile` | One row per user, `content` (jsonb MasterProfile) — **source of truth** for tailoring |
+| `tailor_results` | Cached Claude tailor outputs keyed on `(user_id, jd_hash, profile_hash)`; holds `resume_content`, `review`, `score` |
+| `resume_builder` | Builder versions per user (`content`, `settings`, `version_name`); written directly from the web app via the Supabase client |
+| `profiles` | Display name, avatar, theme |
+| `resumes` + Storage bucket `resumes` | **Legacy** (vault removed); only touched by the account-wipe cleanup |
+
+---
+
+## 9. Known gap driving current work
+
+**The bullet-point mechanism and the scoring mechanism are two disconnected systems** (§4). Editing bullets in the Builder changes `resume_builder` but never the Master-Profile-derived score the user is looking at. The only score that reacts to edits (`/rerank/claude`) is manual, hidden in the wrong tab, and never persisted to the badge. On top of that, the suggestion-insertion logic can drop bullets under the wrong section item with no preview/undo.
+
+**Open design questions for next steps (to discuss):**
+1. Should the score auto-recompute (debounced `/rerank/claude`) as bullets are edited, shown live in the Builder?
+2. Should the Applications badge reflect the **edited** resume (persist the rerank score) or keep the Master-Profile baseline — or show both with a delta?
+3. Bullet UX fixes: correct-target insertion, inline accept/reject, per-suggestion undo.
+
+_(Scoring trigger / badge-source / bullet-UX decisions deferred per the last discussion — to be settled before implementation.)_

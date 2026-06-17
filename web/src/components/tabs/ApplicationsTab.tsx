@@ -28,7 +28,6 @@ interface ApplicationsTabProps {
   onEdit: (app: JobApplication) => void;
   onDelete: (id: string) => void;
   onRowClick: (app: JobApplication) => void;
-  appScores: Record<string, number>;
   aiSummary: string;
   loadingSummary: boolean;
   onRefreshSummary: () => void;
@@ -147,20 +146,6 @@ function AnimatedStatCard({
   );
 }
 
-function ScoreBadge({ score }: { score: number }) {
-  const cls =
-    score >= 75
-      ? "bg-emerald-500/15 text-emerald-400 border-emerald-500/30"
-      : score >= 50
-      ? "bg-amber-500/15 text-amber-400 border-amber-500/30"
-      : "bg-red-500/15 text-red-400 border-red-500/30";
-  return (
-    <span className={cn("inline-flex items-center rounded-full border px-2 py-0.5 text-xs font-bold tabular-nums", cls)}>
-      {score}
-    </span>
-  );
-}
-
 function CompanyAvatar({ company }: { company: string }) {
   const letter = company.trim()[0]?.toUpperCase() ?? "?";
   const palettes = [
@@ -188,7 +173,7 @@ export default function ApplicationsTab({
   apps, sortedApps, stats, loading,
   searchTerm, setSearchTerm, onAddNew,
   onEdit, onDelete, onRowClick,
-  appScores, aiSummary, loadingSummary, onRefreshSummary,
+  aiSummary, loadingSummary, onRefreshSummary,
 }: ApplicationsTabProps) {
   const getStatValue = (key: string) => {
     if (key === "total") return stats.total;
@@ -284,7 +269,7 @@ export default function ApplicationsTab({
             <table className="w-full text-sm">
               <thead>
                 <tr className="border-b border-border/60 bg-muted/40 dark:border-white/[0.06] dark:bg-white/[0.025]">
-                  {["Company", "Position", "Status", "Referral", "Updated", "Applied", "Match", ""].map((h) => (
+                  {["Company", "Position", "Status", "Referral", "Updated", "Applied", ""].map((h) => (
                     <th
                       key={h}
                       className="px-4 py-3.5 text-left text-[10px] font-bold uppercase tracking-[0.12em] text-muted-foreground/60 whitespace-nowrap"
@@ -297,7 +282,7 @@ export default function ApplicationsTab({
               <tbody>
                 {loading ? (
                   <tr>
-                    <td colSpan={8} className="py-20 text-center">
+                    <td colSpan={7} className="py-20 text-center">
                       <div className="flex flex-col items-center gap-3 text-muted-foreground">
                         <Loader2 className="h-6 w-6 animate-spin text-primary/50" />
                         <span className="text-sm">Loading applications…</span>
@@ -306,7 +291,7 @@ export default function ApplicationsTab({
                   </tr>
                 ) : sortedApps.length === 0 ? (
                   <tr>
-                    <td colSpan={8} className="py-20 text-center">
+                    <td colSpan={7} className="py-20 text-center">
                       <div className="flex flex-col items-center gap-3">
                         <div className="flex h-14 w-14 items-center justify-center rounded-2xl border border-border/50 bg-muted/30 dark:border-white/[0.07] dark:bg-white/[0.03]">
                           <Building2 className="h-7 w-7 text-muted-foreground/30" />
@@ -325,7 +310,6 @@ export default function ApplicationsTab({
                 ) : (
                   sortedApps.map((app) => {
                     const cfg = STATUS_CONFIG[app.status] ?? STATUS_CONFIG["Applied"];
-                    const score = appScores[app.id];
                     return (
                       <tr
                         key={app.id}
@@ -366,12 +350,6 @@ export default function ApplicationsTab({
                           <span className="text-[12px] tabular-nums text-muted-foreground/60">
                             {formatDate(app.dateApplied)}
                           </span>
-                        </td>
-                        <td className="px-4 py-3.5">
-                          {score != null
-                            ? <ScoreBadge score={score} />
-                            : <span className="text-muted-foreground/30 text-xs">—</span>
-                          }
                         </td>
                         <td className="px-4 py-3.5" onClick={(e) => e.stopPropagation()}>
                           <div className="flex items-center gap-0.5 opacity-0 group-hover:opacity-100 transition-opacity">

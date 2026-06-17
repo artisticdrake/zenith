@@ -2,32 +2,68 @@ import type { ResumeContent, BulletItem, ResumeSection, ResumeSectionItem } from
 
 // ── Helpers ──────────────────────────────────────────────────────────────────
 
-function escapeLatex(text: string): string {
-  return text
-    .replace(/\\/g, '\\textbackslash{}')
-    .replace(/&/g, '\\&')
-    .replace(/%/g, '\\%')
-    .replace(/\$/g, '\\$')
-    .replace(/#/g, '\\#')
-    .replace(/_/g, '\\_')
-    .replace(/\{/g, '\\{')
-    .replace(/\}/g, '\\}')
-    .replace(/~/g, '\\textasciitilde{}')
-    .replace(/\^/g, '\\textasciicircum{}');
+const LATEX_ESCAPES: Record<string, string> = {
+  '\\': '\\textbackslash{}',
+  '&': '\\&',
+  '%': '\\%',
+  '$': '\\$',
+  '#': '\\#',
+  '_': '\\_',
+  '{': '\\{',
+  '}': '\\}',
+  '~': '\\textasciitilde{}',
+  '^': '\\textasciicircum{}',
+};
+
+export function escapeLatex(text: string): string {
+  // Single pass so escape sequences inserted for one character (e.g. the
+  // braces in \textbackslash{}) are never re-escaped by a later rule.
+  return (text ?? '').replace(/[\\&%$#_{}~^]/g, (ch) => LATEX_ESCAPES[ch]);
+}
+
+const SAFE_URL = /^(?:https?:\/\/|mailto:|tel:)/i;
+const BARE_DOMAIN = /^[\w.-]+\.[a-z]{2,}(?:[/?#].*)?$/i;
+const LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+
+function sanitizeUrl(raw: string): string | null {
+  const url = raw.trim();
+  if (SAFE_URL.test(url)) return url;
+  if (BARE_DOMAIN.test(url)) return `https://${url}`;
+  return null;
+}
+
+// \href's first argument is mostly verbatim, but #, %, & and \ must be escaped.
+function escapeLatexUrl(url: string): string {
+  return url.replace(/\\/g, '\\\\').replace(/([#%&])/g, '\\$1');
 }
 
 function markdownToLatex(text: string): string {
+  // [label](url) → \href{url}{label}
   // **bold** → \textbf{...}
   // *italic* → \textit{...}
-  let result = escapeLatex(text);
+  //
+  // Links are extracted BEFORE escaping (so URL characters like _ and # aren't
+  // mangled) and replaced with private-use placeholder tokens that survive the
+  // escape/bold/italic passes, then restored at the end.
+  const links: string[] = [];
+  let result = (text ?? '').replace(LINK_RE, (_m, label: string, url: string) => {
+    const safe = sanitizeUrl(url);
+    const idx = links.length;
+    links.push(safe ? `\\href{${escapeLatexUrl(safe)}}{${markdownToLatex(label)}}` : markdownToLatex(label));
+    return `${idx}`;
+  });
+
+  result = escapeLatex(result);
   result = result.replace(/\*\*(.+?)\*\*/g, '\\textbf{$1}');
   result = result.replace(/\*(.+?)\*/g, '\\textit{$1}');
+  result = result.replace(/(\d+)/g, (_m, i) => links[Number(i)]);
   return result;
 }
 
 function renderBullets(bullets: BulletItem[]): string {
-  if (!bullets.length) return '';
-  const items = bullets.map((b) => `      \\resumeItem{${markdownToLatex(b.text)}}`).join('\n');
+  const withText = (bullets ?? []).filter((b) => b.text?.trim());
+  if (!withText.length) return '';
+  const items = withText.map((b) => `      \\resumeItem{${markdownToLatex(b.text)}}`).join('\n');
   return `    \\resumeItemListStart\n${items}\n    \\resumeItemListEnd`;
 }
 

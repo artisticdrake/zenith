@@ -3,6 +3,7 @@ import { supabase } from "@/lib/supabase";
 import { todayISO, startOfWeekISO } from "@/lib/dateUtils";
 import { STATUSES, SOURCES } from "@/lib/constants";
 import type { JobApplication, AppFormData } from "@/lib/types";
+import type { AssembleResult } from "@/components/tabs/TailorTab";
 
 import Sidebar, { type TabId } from "@/components/layout/Sidebar";
 import ApplicationsTab from "@/components/tabs/ApplicationsTab";
@@ -125,9 +126,10 @@ export default function JobApplicationTracker({ session }: { session: any }) {
   const [loadingSummary, setLoadingSummary] = useState(false);
 
   // vault resumes removed — Master Profile is the single source of truth
+  // Tailoring scores live only in the tailor/builder flow now (no Applications badge).
 
-  // ── score badges (cached Claude tailor scores) ───────────────────────────
-  const [appScores, setAppScores] = useState<Record<string, number>>({});
+  // ── assembly result (score + change log from POST /assemble/claude) ───────
+  const [assembleResult, setAssembleResult] = useState<AssembleResult | null>(null);
 
   // ── auto-ghost ──────────────────────────────────────────────────────────
   const [ghostNotice, setGhostNotice] = useState<number>(0);
@@ -248,7 +250,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         });
       });
       setApps(mapped);
-      loadCachedScores();
     } catch (err: any) {
       console.error(err);
       setApps([]);
@@ -284,17 +285,12 @@ export default function JobApplicationTracker({ session }: { session: any }) {
   };
 
 
-  // One batch request: stored Claude scores for every application that has a
-  // tailor run matching its JD. No per-app round-trips, no recomputation.
-  const loadCachedScores = async () => {
-    try {
-      const res = await fetch(`${API}/scores/claude`, {
-        headers: { Authorization: `Bearer ${token()}` },
-      });
-      if (!res.ok) return;
-      const d = await res.json();
-      if (d.success && d.scores) setAppScores(d.scores);
-    } catch {}
+  // The Tailor tab assembled a fresh resume version server-side. Surface the
+  // score + change log in the Builder, then switch to it — useResumeData loads
+  // the just-created (newest) version on mount.
+  const handleAssembled = (result: AssembleResult) => {
+    setAssembleResult(result);
+    setActiveTab("resume-builder");
   };
 
   useEffect(() => {
@@ -529,7 +525,11 @@ export default function JobApplicationTracker({ session }: { session: any }) {
         {/* Resume Builder — full-height, no padding wrapper */}
         {activeTab === "resume-builder" && (
           <div className="flex-1 overflow-hidden">
-            <ResumeBuilder session={session} />
+            <ResumeBuilder
+              session={session}
+              assembleResult={assembleResult}
+              onDismissAssemble={() => setAssembleResult(null)}
+            />
           </div>
         )}
 
@@ -548,8 +548,27 @@ export default function JobApplicationTracker({ session }: { session: any }) {
           </div>
         </div>
 
+        {/* Tailor — always mounted so the JD and results survive tab switches */}
+        <div className={activeTab === "tailor" ? "flex-1 overflow-y-auto" : "hidden"}>
+          <div className="relative z-10 max-w-7xl mx-auto px-7 py-8">
+            <div className="mb-8">
+              <h1 className="text-[28px] font-black tracking-tight leading-tight">
+                Resume <span className="gradient-text">Tailor</span>
+              </h1>
+              <p className="text-[13px] text-muted-foreground/60 mt-1.5">
+                Paste a job description — Zenith assembles your best one-page resume from your content library
+              </p>
+            </div>
+            <TailorTab
+              apps={apps}
+              session={session}
+              onAssembled={handleAssembled}
+            />
+          </div>
+        </div>
+
         {/* All other tabs */}
-        {activeTab !== "resume-builder" && activeTab !== "master-info" && (
+        {activeTab !== "resume-builder" && activeTab !== "master-info" && activeTab !== "tailor" && (
         <div className="flex-1 overflow-y-auto">
         {/* Ambient background orbs — dark mode only */}
         <div className="pointer-events-none fixed inset-0 overflow-hidden hidden dark:block" style={{ zIndex: 0 }}>
@@ -591,13 +610,11 @@ export default function JobApplicationTracker({ session }: { session: any }) {
               )}
               {activeTab === "analytics" && <>Analytics <span className="gradient-text">Insights</span></>}
               {activeTab === "profile" && "Your Profile"}
-              {activeTab === "tailor" && <>Resume <span className="gradient-text">Tailor</span></>}
             </h1>
             <p className="text-[13px] text-muted-foreground/60 mt-1.5">
               {activeTab === "applications" && `${apps.length} application${apps.length !== 1 ? "s" : ""} tracked`}
               {activeTab === "analytics" && "Performance insights across your entire job search"}
               {activeTab === "profile" && "Manage your account, data, and preferences"}
-              {activeTab === "tailor" && "Paste a job description — Zenith assembles your best one-page resume from your content library"}
             </p>
           </div>
 
@@ -613,7 +630,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
               onEdit={handleEdit}
               onDelete={handleDelete}
               onRowClick={setExpandedApp}
-              appScores={appScores}
               aiSummary={aiSummary}
               loadingSummary={loadingSummary}
               onRefreshSummary={generateAiSummary}
@@ -640,17 +656,6 @@ export default function JobApplicationTracker({ session }: { session: any }) {
             />
           )}
 
-          {activeTab === "tailor" && (
-            <TailorTab
-              apps={apps}
-              session={session}
-              onOpenInBuilder={(_content, _company, _role) => {
-                // Content was already written to localStorage by TailorTab before this call.
-                // useResumeData.fetchVersions reads it atomically on next mount.
-                setActiveTab("resume-builder");
-              }}
-            />
-          )}
         </div>
         </div>
         )}

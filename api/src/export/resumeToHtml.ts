@@ -76,10 +76,53 @@ function esc(raw: string | undefined | null): string {
     .replace(/"/g, '&quot;');
 }
 
+const SAFE_URL = /^(?:https?:\/\/|mailto:|tel:)/i;
+const BARE_DOMAIN = /^[\w.-]+\.[a-z]{2,}(?:[/?#].*)?$/i;
+const LINK_RE = /\[([^\]]+)\]\(([^)\s]+)\)/g;
+
+/** Normalize a URL to a safe absolute form, or null for unsafe schemes. */
+function sanitizeUrl(raw: string): string | null {
+  const url = raw.trim();
+  if (SAFE_URL.test(url)) return url;
+  if (BARE_DOMAIN.test(url)) return `https://${url}`;
+  return null;
+}
+
+function emphasis(s: string): string {
+  return s
+    .replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>')
+    .replace(/\*(.+?)\*/g, '<em>$1</em>');
+}
+
+// Private-use sentinels keep the generated <a> tag (and its href) away from the
+// bold/italic passes, so a URL containing * or ** is never mangled.
+const L_OPEN = String.fromCharCode(0xe000);
+const L_CLOSE = String.fromCharCode(0xe001);
+const L_RESTORE = new RegExp(`${L_OPEN}(\\d+)${L_CLOSE}`, 'g');
+
 function md(raw: string | undefined | null): string {
   const escaped = esc(raw);
-  const withBold = escaped.replace(/\*\*(.+?)\*\*/g, '<strong>$1</strong>');
-  return withBold.replace(/\*(.+?)\*/g, '<em>$1</em>');
+  const links: string[] = [];
+  const withPlaceholders = escaped.replace(LINK_RE, (_m, label: string, url: string) => {
+    const idx = links.length;
+    const renderedLabel = emphasis(label);
+    const safe = sanitizeUrl(url);
+    links.push(
+      safe
+        ? `<a href="${safe.replace(/"/g, '%22')}" style="color:inherit;text-decoration:underline">${renderedLabel}</a>`
+        : renderedLabel
+    );
+    return `${L_OPEN}${idx}${L_CLOSE}`;
+  });
+  return emphasis(withPlaceholders).replace(L_RESTORE, (_m, i) => links[Number(i)]);
+}
+
+/** Render a header contact value as a link (email/web) or plain text (phone). */
+function contactPart(value: string, kind: 'email' | 'phone' | 'web'): string {
+  if (kind === 'phone') return esc(value);
+  const href = kind === 'email' ? `mailto:${value.trim()}` : sanitizeUrl(value);
+  if (!href) return esc(value);
+  return `<a href="${href.replace(/"/g, '%22')}" style="color:inherit;text-decoration:underline">${esc(value)}</a>`;
 }
 
 // ── Text normalization ────────────────────────────────────────────────────────
@@ -206,6 +249,77 @@ function renderSection(section: ResumeSection, fs: number, ls: number, sectionSp
     </div>`;
 }
 
+// ── Plain-text export (ATS-visible text) ───────────────────────────────────────
+
+/**
+ * Strip inline markdown + link syntax to the visible text a reader (or an ATS
+ * text extractor) actually sees: a [label](url) link becomes its label, and
+ * bold / italic emphasis markers are removed.
+ */
+function plain(raw: string | undefined | null): string {
+  const collapsed = (raw ?? '').replace(/\s+/g, ' ').trim();
+  if (!collapsed) return '';
+  return collapsed
+    .replace(LINK_RE, (_m, label: string) => label)
+    .replace(/\*\*(.+?)\*\*/g, '$1')
+    .replace(/\*(.+?)\*/g, '$1');
+}
+
+/**
+ * Render ResumeContent to the same plain text the exported PDF exposes to an ATS.
+ * This is the canonical object that gets HASHED and SCORED — so the score always
+ * reflects exactly what a recruiter's parser reads, and is independent of fonts
+ * / spacing / other presentation-only settings.
+ *
+ * Mirrors the field mapping in resumeContentToHtml (header → summary → sections),
+ * applying the same "skip empty item / empty skill category" guards.
+ */
+export function resumeContentToText(content: ResumeContent): string {
+  const lines: string[] = [];
+  const h = content.header ?? ({} as ResumeHeader);
+
+  if (h.name) lines.push(plain(h.name));
+  if (h.title) lines.push(plain(h.title));
+  const contact = [h.phone, h.email, h.linkedin, h.github, h.portfolio]
+    .filter(Boolean).map(v => plain(v));
+  if (contact.length) lines.push(contact.join(' | '));
+
+  if (content.showSummary && content.summary?.trim()) {
+    lines.push('Summary');
+    lines.push(plain(content.summary));
+  }
+
+  for (const section of content.sections ?? []) {
+    if (!section.visible) continue;
+    lines.push(plain(section.title));
+
+    for (const item of section.items ?? []) {
+      if (section.type === 'skills') {
+        if (item.category?.trim() && item.items?.trim()) {
+          lines.push(`${plain(item.category)}: ${plain(item.items)}`);
+        }
+      } else if (section.type === 'projects') {
+        if (!item.projectName && !item.techStack && !item.dateRange) continue;
+        const head = [item.projectName, item.techStack].filter(Boolean).map(v => plain(v)).join(' | ');
+        const row = [head, item.dateRange ? plain(item.dateRange) : ''].filter(Boolean).join('  ');
+        if (row) lines.push(row);
+        for (const b of item.bullets ?? []) { const t = plain(b.text); if (t) lines.push(`- ${t}`); }
+      } else if (section.type === 'custom') {
+        const t = plain(item.content); if (t) lines.push(t);
+      } else { // experience / education
+        if (!item.organization && !item.role && !item.date) continue;
+        const r1 = [item.organization, item.date].filter(Boolean).map(v => plain(v)).join('  ');
+        const r2 = [item.role, item.location].filter(Boolean).map(v => plain(v)).join('  ');
+        if (r1) lines.push(r1);
+        if (r2) lines.push(r2);
+        for (const b of item.bullets ?? []) { const t = plain(b.text); if (t) lines.push(`- ${t}`); }
+      }
+    }
+  }
+
+  return lines.join('\n').replace(/\n{2,}/g, '\n').trim();
+}
+
 // ── Main export ───────────────────────────────────────────────────────────────
 
 export function resumeContentToHtml(content: ResumeContent, settings: ResumeSettings): string {
@@ -221,13 +335,13 @@ export function resumeContentToHtml(content: ResumeContent, settings: ResumeSett
   const fontStack = FONT_MAP[fontFamily] ?? FONT_MAP.charter;
   const marginPt = marginSize * 72;
 
-  // Header contact line
+  // Header contact line — email/web fields render as links, phone stays plain.
   const contactParts = [
-    content.header.phone,
-    content.header.email,
-    content.header.linkedin,
-    content.header.github,
-    content.header.portfolio,
+    content.header.phone   ? contactPart(content.header.phone, 'phone') : '',
+    content.header.email   ? contactPart(content.header.email, 'email') : '',
+    content.header.linkedin ? contactPart(content.header.linkedin, 'web') : '',
+    content.header.github  ? contactPart(content.header.github, 'web') : '',
+    content.header.portfolio ? contactPart(content.header.portfolio, 'web') : '',
   ].filter(Boolean);
 
   const headerHtml = `
@@ -239,7 +353,7 @@ export function resumeContentToHtml(content: ResumeContent, settings: ResumeSett
         ? `<div style="font-size:${fs * 1.05}pt;font-weight:normal;margin-bottom:${fs * 0.2}pt;line-height:1.2">${esc(content.header.title)}</div>`
         : ''}
       ${contactParts.length > 0
-        ? `<div style="font-size:${fs * 0.95}pt;color:#222;line-height:1.3">${contactParts.map(esc).join(' | ')}</div>`
+        ? `<div style="font-size:${fs * 0.95}pt;color:#222;line-height:1.3">${contactParts.join(' | ')}</div>`
         : ''}
     </div>`;
 

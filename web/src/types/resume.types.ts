@@ -69,6 +69,10 @@ export interface ResumeBuilderData {
   updated_at: string;
   content: ResumeContent;
   settings: ResumeSettings;
+  // The target JD this version was tailored against (set by /assemble). The
+  // Builder scores the live content against this; null/absent → scoring disabled.
+  job_description?: string | null;
+  jd_hash?: string | null;
 }
 
 // ── Undo/Redo state ─────────────────────────────────────────────────────────
