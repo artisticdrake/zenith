@@ -1,0 +1,32 @@
+# Node modules
+node_modules/
+.claude/
+# Environment variables (CRITICAL)
+.env
+.env.*
+!.env.example
+
+# Build outputs
+dist/
+build/
+out/
+
+# IDE/OS files
+.vscode/
+.DS_Store
+*.log
+app_path.docx
+CLAUDE.md
+
+# Personal data (repo is public) — real master profile + personal test harnesses.
+# scripts/validate-prompts.mjs is SAFE (synthetic fixtures only) and stays tracked.
+master_profile*.json
+scripts/test-scorer.mjs
+scripts/test-bucket.mjs
+
+# Debug/trace artifacts — contain real resume PII, must never be tracked.
+api/src/parse-diagnosis.txt
+api/src/pipeline-trace.txt
+api/src/pipeline-trace-v2.txt
+api/src/pipeline-trace-v3.txt
+api/src/raw-extracted-text.txt

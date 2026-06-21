@@ -546,7 +546,7 @@ export default function MasterProfileEditor({ session, alwaysOpen, seedProfile }
               {/* ── Header ─────────────────────────────────────────────── */}
               <Section title="Header" count={1}>
                 <div className="grid grid-cols-2 gap-3">
-                  <Field label="Full Name" value={profile.header.name} onChange={v => updHeader({ name: v })} placeholder="Preetham Prathipati" />
+                  <Field label="Full Name" value={profile.header.name} onChange={v => updHeader({ name: v })} placeholder="Jane Doe" />
                   <Field label="Professional Title" value={profile.header.title} onChange={v => updHeader({ title: v })} placeholder="ML Engineer | NLP" />
                   <Field label="Phone" value={profile.header.phone} onChange={v => updHeader({ phone: v })} placeholder="617-000-0000" />
                   <Field label="Email" value={profile.header.email} onChange={v => updHeader({ email: v })} placeholder="you@email.com" />
