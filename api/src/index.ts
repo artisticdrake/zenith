@@ -7,7 +7,10 @@ import { requireAuth } from './middleware/auth';
 import OpenAI from 'openai';
 import { resumeContentToHtml, resumeContentToText } from './export/resumeToHtml';
 import { generatePdf } from './export/pdfExport';
+import { coverLetterToHtml } from './export/coverLetterToHtml';
 import { normalizeResumeContent, normalizeResumeSettings, normalizeReview } from './lib/normalizeResume';
+import { buildScorerPrompt, buildTailorPrompt, buildAssemblerPrompt, buildCoverLetterPrompt } from './lib/prompts';
+import { sanitizeResumeContent, sanitizeBulletSuggestions, sanitizeResumeText } from './lib/sanitizeResumeText';
 
 dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
@@ -530,12 +533,13 @@ app.post('/master-profile/seed-from-text', requireAuth, async (req, res) => {
 
 Rules:
 - header: extract name, title (professional headline), phone, email, linkedin (path only e.g. "linkedin.com/in/user"), github (path only), portfolio
-- experiences: array of work experiences with id ("exp-N"), org, role, location (optional), startDate, endDate (null if current), current (boolean), defaultInclude: true, tags: [], bullets: array of { id: "b-N", text, skills: [], strength: 2, tags: [] }
+- experiences: array of work experiences with id ("exp-N"), org, role, location (optional), startDate, endDate (null if current), current (boolean), defaultInclude: true, tags: [], bullets: array of { id: "b-N", text, skills: [], strength: 2, tags: [] }, AND experienceType: classify each role as exactly one of "professional-engineering" | "internship" | "research" | "non-engineering-ops" | "other" — infer from title/org/dates. A full-time post-degree software/ML role is "professional-engineering"; anything labeled intern/co-op is "internship"; lab/research-assistant roles are "research"; mailroom/retail/admin/support are "non-engineering-ops". This drives seniority bucketing downstream, so be accurate and do NOT upgrade an intern or ops role.
 - projects: array with id ("proj-N"), name, startDate, endDate, techStack (array of strings), tags: [], bullets: array of { id: "b-N", text, skills: [], strength: 2, tags: [] }
 - education: array with id ("edu-N"), institution, degree, field (optional), startDate, endDate, gpa (optional), defaultInclude: true, bullets: []
 - skills: flat array with display (display name e.g. "PyTorch"), canonical (lowercase no spaces e.g. "pytorch"), category (group e.g. "ML/DL"), proven: true
 - summaries: if a summary/objective section exists, create one entry with id "sum-1", text, tags: []; else empty array
-- awards: array with id ("award-N"), title, issuer, date, tags: []; else empty array
+- awards: array with id ("award-N"), title, issuer, date, tags: [], AND these validation fields when present in the text (else null): placement (e.g. "2nd of 6 teams", "3rd place", "1st"), amount (e.g. "$4,000"), cohortSize (e.g. "364 participants", "6 teams"), percentile (e.g. "top 0.6%"), validatedBy (named judges/orgs/users, e.g. "judged by researchers from Google DeepMind, Suno, Ableton"). Capture these verbatim from the text; never invent them.
+- workAuth: a single string capturing any work-authorization / visa info stated in the resume (e.g. "F-1 STEM OPT, ~3 yrs, no sponsorship required"); null if none stated. Do NOT infer or fabricate authorization.
 
 Return ONLY the JSON object — no markdown wrapping.
 
@@ -547,7 +551,8 @@ JSON shape (follow exactly):
   "projects": [],
   "education": [],
   "skills": [],
-  "awards": []
+  "awards": [],
+  "workAuth": null
 }
 
 Resume text:
@@ -680,132 +685,7 @@ app.post('/tailor/claude', requireAuth, async (req, res) => {
 
   const masterProfileJson = JSON.stringify(lib, null, 2);
 
-  const systemPrompt = `You are a professional resume tailor. Your ONLY data source is the candidate's Master Profile below.
-
-MASTER PROFILE (your sole source of truth):
-${masterProfileJson}
-
-HARD RULES — non-negotiable:
-1. You may SELECT, CUT, REORDER, CONDENSE bullets, and WRITE a tailored professional summary.
-2. You must ONLY use facts present in the Master Profile. NEVER invent, embellish, or add any skill, metric, tool, title, experience, or project that is not explicitly present.
-3. Do NOT optimize toward any numeric match score. Focus on honest, relevant presentation.
-4. Produce a ONE-PAGE resume: be selective. Max 4 bullets per experience, max 3 per project.
-5. Return ONLY valid JSON — no markdown fences, no explanation, no preamble.
-
-HONEST FIT ASSESSMENT — required in every response:
-After tailoring, assess fit honestly and candidly. Judge how well the candidate's REAL background
-(Master Profile only) matches this JD's core requirements. If they are a weak match — missing core
-requirements, or the JD forces dropping their strongest work — say so plainly and explain why. Do NOT
-inflate fit to be encouraging; you are an honest evaluator, not a cheerleader. Never invent or imply
-qualifications to improve the verdict.
-
-SCOPING (these two review fields must never duplicate each other):
-- genuineGaps: specific JD requirements the candidate genuinely LACKS — the verdict's evidence
-- suggestions: how to strengthen what the candidate DOES have — actionable improvements on existing strengths
-
-ACTIONABLE BULLETS — required: For EVERY suggestion you give, also produce a matching entry in
-"bulletSuggestions": a concrete, ready-to-paste resume line the candidate can drop straight into the
-Builder. Each entry has:
-- "section": which Builder section it belongs in — "experience", "projects", "skills", or "summary"
-- "target": the company/role/project name it should sit under (omit for skills/summary)
-- "guidance": the same advice, phrased as why this strengthens the resume for THIS JD
-- "bullet": the exact text to paste. For experience/projects write a strong, metric-led resume bullet
-  in the candidate's voice; for skills give a comma-separated list; for summary give one sentence.
-Ground every bullet in the candidate's real Master Profile background — never fabricate. Where a metric
-or specific detail would strengthen it but is not in the profile, use a clear placeholder like "[X]%" or
-"[N] users" so the candidate fills in the real number. There must be one bulletSuggestions entry per
-suggestion (and you may add a few more high-value ones).
-
-matchScore: provide an integer 0–100 reflecting how well this candidate's real background meets this JD.
-Calibrate honestly: 80–100 = strong fit, most core requirements met; 50–79 = partial fit, notable gaps;
-below 50 = weak fit, fundamental mismatches. Must be consistent with fitAssessment.level.
-
-REQUIRED OUTPUT JSON STRUCTURE (follow exactly — the Builder depends on these field names):
-{
-  "resumeContent": {
-    "header": { "name": "", "title": "", "phone": "", "email": "", "linkedin": "", "github": "", "portfolio": "" },
-    "summary": "2-3 sentence tailored professional summary written from facts in the Master Profile",
-    "showSummary": true,
-    "sections": [
-      {
-        "id": "experience",
-        "type": "experience",
-        "title": "Experience",
-        "visible": true,
-        "items": [
-          {
-            "id": "exp-1",
-            "organization": "Company Name (from Master Profile)",
-            "role": "Job Title (from Master Profile)",
-            "location": "City, State (from Master Profile, omit if missing)",
-            "date": "Jan 2023 – Present",
-            "bullets": [{ "id": "b-1", "text": "Bullet text verbatim or condensed from Master Profile" }]
-          }
-        ]
-      },
-      {
-        "id": "projects",
-        "type": "projects",
-        "title": "Projects",
-        "visible": true,
-        "items": [
-          {
-            "id": "proj-1",
-            "projectName": "Project Name (from Master Profile)",
-            "techStack": "Comma-separated tech stack from Master Profile",
-            "dateRange": "2024",
-            "bullets": [{ "id": "b-10", "text": "Bullet text from Master Profile" }]
-          }
-        ]
-      },
-      {
-        "id": "education",
-        "type": "education",
-        "title": "Education",
-        "visible": true,
-        "items": [
-          {
-            "id": "edu-1",
-            "organization": "Institution name from Master Profile",
-            "role": "Degree, Field (from Master Profile)",
-            "date": "Aug 2024 – May 2026",
-            "bullets": []
-          }
-        ]
-      },
-      {
-        "id": "skills",
-        "type": "skills",
-        "title": "Technical Skills",
-        "visible": true,
-        "items": [
-          { "id": "skill-cat-1", "category": "Category from Master Profile", "items": "Skill1, Skill2, Skill3 — only from Master Profile skills" }
-        ]
-      }
-    ]
-  },
-  "review": {
-    "summary": "1-2 sentence narrative of what you tailored and why",
-    "keptItems": ["Experience: Role at Org — reason kept", "Project: Name — reason kept"],
-    "droppedItems": ["Experience: Role at Org — reason dropped"],
-    "skillsSurfaced": ["skill1", "skill2"],
-    "suggestions": ["How to strengthen something the candidate DOES have — do NOT list gap requirements here"],
-    "bulletSuggestions": [
-      { "section": "experience", "target": "Company Name", "guidance": "Why this strengthens the resume for this JD", "bullet": "Ready-to-paste resume bullet, metric-led, in the candidate's voice (use [X] placeholders for unknown numbers)" }
-    ],
-    "fitAssessment": { "level": "strong | moderate | weak", "rationale": "1-2 sentences on fit verdict based on real evidence from Master Profile vs JD" },
-    "recommendation": "One-liner: e.g. 'Strong match — apply.' or 'Weak fit; your ML edge is buried here — deprioritize.'",
-    "genuineGaps": ["Specific JD requirement the candidate lacks — e.g. 'Windows Server / AD'", "3+ yrs enterprise IT (candidate has 1)"],
-    "matchScore": 73
-  }
-}`;
-
-  const userMessage = `Tailor a one-page resume for the following job description. Choose the most relevant experiences and projects from the Master Profile, select the best bullets, group and surface relevant skills, and write a tailored professional summary (2-3 sentences).
-
-JOB DESCRIPTION:
-${jobDescription.slice(0, 6000)}
-
-Return ONLY the JSON object as described in the system prompt. No markdown, no extra text.`;
+  const { system: systemPrompt, user: userMessage } = buildTailorPrompt(masterProfileJson, jobDescription);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -818,6 +698,7 @@ Return ONLY the JSON object as described in the system prompt. No markdown, no e
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
         max_tokens: 6000,
+        temperature: 0,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       }),
@@ -861,8 +742,13 @@ Return ONLY the JSON object as described in the system prompt. No markdown, no e
     // Coerce to the exact ResumeContent shape the Builder depends on BEFORE
     // caching — a creative Claude response must never poison tailor_results
     // or crash the Builder render.
-    const resumeContent = normalizeResumeContent(parsed.resumeContent);
+    // Sanitize resume-bound text only (bullets, summary, titles + paste-ready
+    // bulletSuggestions). Analytical prose in the review is left untouched.
+    const resumeContent = sanitizeResumeContent(normalizeResumeContent(parsed.resumeContent));
     const review = normalizeReview(parsed.review);
+    if (review && Array.isArray((review as any).bulletSuggestions)) {
+      (review as any).bulletSuggestions = sanitizeBulletSuggestions((review as any).bulletSuggestions);
+    }
 
     // Persist to cache — score lives here so it is never recomputed for an unchanged JD+profile
     const { error: saveErr } = await supabase
@@ -939,52 +825,7 @@ app.post('/rerank/claude', requireAuth, async (req, res) => {
     return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
   }
 
-  const systemPrompt = `You are an honest, rigorous resume evaluator. You are given a candidate's CURRENT resume (already written and edited by them) and a target job description. Score how well THIS resume — exactly as written — matches the job description.
-
-HARD RULES — non-negotiable:
-1. Judge ONLY what is actually present in the resume. Do NOT assume skills, tools, or experience that are not written there.
-2. Be honest and candid. Do NOT inflate the score to be encouraging — you are an evaluator, not a cheerleader.
-3. Return ONLY valid JSON — no markdown fences, no explanation, no preamble.
-
-SCOPING (these two fields must never duplicate each other):
-- genuineGaps: specific JD requirements this resume does NOT evidence.
-- suggestions: concrete edits to improve THIS resume's match — wording, ordering, emphasis, which existing content to surface.
-
-ACTIONABLE BULLETS — required: For EVERY suggestion, also produce a matching "bulletSuggestions" entry the
-candidate can paste straight into the Builder: { "section": "experience"|"projects"|"skills"|"summary",
-"target": company/role/project it sits under (omit for skills/summary), "guidance": why it helps for THIS
-JD, "bullet": the exact text to paste }. Keep bullets grounded in what the resume already shows; use a
-"[X]" placeholder for any metric not present rather than inventing one.
-
-matchScore: integer 0–100 reflecting how well the resume as written meets this JD.
-80–100 = strong fit, most core requirements clearly evidenced; 50–79 = partial fit, notable gaps;
-below 50 = weak fit, fundamental mismatches. Must be consistent with fitAssessment.level.
-
-REQUIRED OUTPUT JSON STRUCTURE (follow exactly):
-{
-  "review": {
-    "summary": "1-2 sentence assessment of how this resume reads against the JD",
-    "skillsSurfaced": ["key matching skills this resume already surfaces well"],
-    "suggestions": ["concrete edit to strengthen the match using content already present"],
-    "bulletSuggestions": [
-      { "section": "experience", "target": "Company Name", "guidance": "Why this edit helps for this JD", "bullet": "Ready-to-paste resume line grounded in existing content (use [X] for missing metrics)" }
-    ],
-    "fitAssessment": { "level": "strong | moderate | weak", "rationale": "1-2 sentences grounded in resume vs JD evidence" },
-    "recommendation": "One-liner verdict, e.g. 'Strong match — apply.' or 'Surface your ML work higher; it's buried.'",
-    "genuineGaps": ["Specific JD requirement not evidenced in the resume"],
-    "matchScore": 73
-  }
-}`;
-
-  const userMessage = `Evaluate the candidate's CURRENT resume against the target job description and return the JSON review described in the system prompt.
-
-TARGET JOB DESCRIPTION:
-${jobDescription.slice(0, 6000)}
-
-CANDIDATE'S CURRENT RESUME (plain text — exactly as it renders, do not invent beyond it):
-${resumeContentToText(resumeContent).slice(0, 9000)}
-
-Return ONLY the JSON object. No markdown, no extra text.`;
+  const { system: systemPrompt, user: userMessage } = buildScorerPrompt(jobDescription, resumeContentToText(resumeContent));
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -996,7 +837,8 @@ Return ONLY the JSON object. No markdown, no extra text.`;
       },
       body: JSON.stringify({
         model: 'claude-sonnet-4-6',
-        max_tokens: 2000,
+        max_tokens: 3000,
+        temperature: 0,
         system: systemPrompt,
         messages: [{ role: 'user', content: userMessage }],
       }),
@@ -1031,6 +873,10 @@ Return ONLY the JSON object. No markdown, no extra text.`;
     const review = normalizeReview(parsed.review ?? parsed);
     if (!review) {
       return res.status(500).json({ success: false, error: 'Claude response missing review' });
+    }
+    // Sanitize paste-ready bullets only; analytical prose is left untouched.
+    if (Array.isArray((review as any).bulletSuggestions)) {
+      (review as any).bulletSuggestions = sanitizeBulletSuggestions((review as any).bulletSuggestions);
     }
 
     const score = typeof review.matchScore === 'number' ? Math.round(review.matchScore) : null;
@@ -1120,42 +966,7 @@ app.post('/assemble/claude', requireAuth, async (req, res) => {
       ? normalizeResumeContent(latestVersion.content)
       : null;
 
-  const systemPrompt = `You are a resume assembler. You are given THREE sources of candidate content: (1) the candidate's full Master Profile JSON, (2) their CURRENT resume content, and (3) a set of APPROVED new bullets the candidate explicitly selected. Treat every bullet across all three as a candidate 'block'.
-
-Your job: assemble the single best ONE-PAGE resume for the target job description, maximizing genuine fit and recruiter callback likelihood — honestly.
-
-You have FULL AUTHORITY to keep, cut, reorder, condense, and replace blocks. An approved new bullet may replace a weaker existing bullet or earn an added slot — your judgment. Decide what stays and what goes.
-
-HARD RULES:
-1. ONE PAGE. Be selective; balance section density toward impact.
-2. Use ONLY facts present in the Master Profile, the current resume, or the approved bullets. NEVER invent or embellish any skill, metric, tool, title, experience, or project.
-3. If an approved bullet contains a placeholder like [X], keep it verbatim. NEVER fabricate a number to fill it.
-4. Do not optimize toward the score; optimize for honest, relevant presentation.
-5. Return ONLY valid JSON, no markdown fences, no preamble.
-
-MASTER PROFILE:
-${JSON.stringify(lib ?? {}, null, 2)}
-
-CURRENT RESUME:
-${currentResume ? JSON.stringify(currentResume) : 'None — the candidate has no existing resume yet. Build from the Master Profile and approved bullets.'}
-
-APPROVED BULLETS:
-${JSON.stringify(approvedBullets, null, 2)}
-
-Output JSON shape:
-{ "resumeContent": { "header": {...}, "summary": "...", "showSummary": true, "sections": [...] },
-  "score": <integer 0-100, honest fit of THIS assembled resume to the JD>,
-  "changeLog": [ "<short line: kept/dropped/replaced X because Y>", ... ] }
-
-The resumeContent.sections must follow this shape exactly (the Builder depends on these field names):
-{ "id": "experience", "type": "experience", "title": "Experience", "visible": true,
-  "items": [{ "id": "exp-1", "organization": "", "role": "", "location": "", "date": "Jan 2023 – Present", "bullets": [{ "id": "b-1", "text": "" }] }] }
-Use type "projects" (items have projectName, techStack, dateRange, bullets), "education" (items have organization, role, date), and "skills" (items have category, items as a comma-separated string).`;
-
-  const userMessage = `Assemble the best one-page resume for the following job description. Return ONLY the JSON object described in the system prompt.
-
-TARGET JOB DESCRIPTION:
-${jobDescription.slice(0, 6000)}`;
+  const { system: systemPrompt, user: userMessage } = buildAssemblerPrompt(lib, currentResume, approvedBullets, jobDescription);
 
   try {
     const response = await fetch('https://api.anthropic.com/v1/messages', {
@@ -1204,8 +1015,9 @@ ${jobDescription.slice(0, 6000)}`;
       return res.status(500).json({ success: false, error: 'Claude response missing resumeContent.sections' });
     }
 
-    // Coerce to the Builder's exact shape before persisting
-    const resumeContent = normalizeResumeContent(parsed.resumeContent);
+    // Coerce to the Builder's exact shape before persisting, then sanitize the
+    // resume-bound text (assembler output has no bulletSuggestions to sanitize).
+    const resumeContent = sanitizeResumeContent(normalizeResumeContent(parsed.resumeContent));
     const score = typeof parsed.score === 'number' ? Math.round(parsed.score) : null;
     const changeLog = Array.isArray(parsed.changeLog)
       ? parsed.changeLog.filter((c: any) => typeof c === 'string').slice(0, 30)
@@ -1259,6 +1071,298 @@ ${jobDescription.slice(0, 6000)}`;
     return res.json({ success: true, version, resumeContent, score, changeLog });
   } catch (err: any) {
     console.error('[/assemble/claude] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── Cover letter (Claude writes a job-specific letter from profile + JD) ────────
+// Persistence mirrors tailor_results: content-addressed on (user_id, jd_hash,
+// profile_hash). A letter is also linked to an application_id when known so the
+// Cover Letter tab can load it on open without calling Claude.
+
+// POST /cover-letter/claude — generate (or regenerate) a cover letter.
+// Body: { jobDescription: string, applicationId?: string, company?: string, role?: string }
+// Cache: an UNEDITED stored letter for the same JD + profile is returned with no
+// Claude call. A regenerate over an edited letter discards the edit and writes
+// fresh (edited -> false), matching the "Generate/Regenerate is explicit" UX.
+app.post('/cover-letter/claude', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { jobDescription, applicationId, company, role } = req.body;
+
+  if (!jobDescription || typeof jobDescription !== 'string') {
+    return res.status(400).json({ success: false, error: 'jobDescription is required' });
+  }
+
+  // Load master profile — the ONLY allowed content source (same as /tailor/claude)
+  const { data: profileRow, error: profileErr } = await authClient
+    .from('master_profile')
+    .select('content')
+    .eq('user_id', userId)
+    .maybeSingle();
+
+  if (profileErr) return res.status(500).json({ success: false, error: profileErr.message });
+
+  const lib = profileRow?.content;
+  if (!lib?.experiences?.length && !lib?.projects?.length) {
+    return res.status(400).json({ success: false, error: 'Master profile is empty. Go to the Master Information tab and build your profile first.' });
+  }
+
+  const jdHash = hashJD(jobDescription);
+  const profileHash = hashProfile(lib);
+
+  // Cache check — same JD + same profile + not manually edited => return stored letter
+  try {
+    const { data: cached } = await supabase
+      .from('cover_letters')
+      .select('id, cover_letter, footer, edited')
+      .eq('user_id', userId)
+      .eq('jd_hash', jdHash)
+      .eq('profile_hash', profileHash)
+      .maybeSingle();
+
+    if (cached?.cover_letter && !cached.edited) {
+      console.log(`[/cover-letter/claude] cache hit userId=${userId} jdHash=${jdHash}`);
+      return res.json({ success: true, id: cached.id, coverLetter: cached.cover_letter, footer: cached.footer ?? null, fromCache: true });
+    }
+  } catch (err: any) {
+    console.warn('[/cover-letter/claude] cache lookup failed (continuing without cache):', err.message);
+  }
+
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  const masterProfileJson = JSON.stringify(lib, null, 2);
+  const { system: systemPrompt, user: userMessage } = buildCoverLetterPrompt(
+    masterProfileJson, jobDescription,
+    typeof company === 'string' ? company : undefined,
+    typeof role === 'string' ? role : undefined,
+  );
+
+  try {
+    const response = await fetch('https://api.anthropic.com/v1/messages', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'x-api-key': apiKey,
+        'anthropic-version': '2023-06-01',
+      },
+      body: JSON.stringify({
+        model: 'claude-sonnet-4-6',
+        max_tokens: 1500,
+        temperature: 0,
+        system: systemPrompt,
+        messages: [{ role: 'user', content: userMessage }],
+      }),
+    });
+
+    const responseData = await response.json() as any;
+    if (!response.ok) {
+      const errMsg = responseData?.error?.message || 'Claude API error';
+      console.error('[/cover-letter/claude] Anthropic error:', errMsg);
+      return res.status(500).json({ success: false, error: errMsg });
+    }
+
+    const rawText: string = responseData?.content?.[0]?.text ?? '';
+
+    // Defensive JSON parse — strip code fences if present
+    let parsed: any;
+    try {
+      const cleaned = rawText
+        .replace(/^```(?:json)?\s*/m, '')
+        .replace(/\s*```\s*$/m, '')
+        .trim();
+      parsed = JSON.parse(cleaned);
+    } catch {
+      const match = rawText.match(/\{[\s\S]*\}/);
+      if (!match) {
+        console.error('[/cover-letter/claude] invalid JSON from Claude:', rawText.slice(0, 300));
+        return res.status(500).json({ success: false, error: 'Claude returned malformed JSON', raw: rawText.slice(0, 300) });
+      }
+      try { parsed = JSON.parse(match[0]); }
+      catch { return res.status(500).json({ success: false, error: 'Could not parse Claude response as JSON', raw: rawText.slice(0, 300) }); }
+    }
+
+    if (typeof parsed.coverLetter !== 'string' || !parsed.coverLetter.trim()) {
+      console.error('[/cover-letter/claude] missing coverLetter in:', JSON.stringify(parsed).slice(0, 300));
+      return res.status(500).json({ success: false, error: 'Claude response missing coverLetter', raw: rawText.slice(0, 300) });
+    }
+
+    // Same hygiene the resume-bound text gets: strip em dashes / arrows.
+    const coverLetter = sanitizeResumeText(parsed.coverLetter.trim());
+
+    // Persist — service-role upsert keyed on (user_id, jd_hash, profile_hash),
+    // exactly like tailor_results. A fresh generation is never "edited".
+    const { data: saved, error: saveErr } = await supabase
+      .from('cover_letters')
+      .upsert({
+        user_id: userId,
+        application_id: applicationId ?? null,
+        jd_hash: jdHash,
+        profile_hash: profileHash,
+        cover_letter: coverLetter,
+        company: typeof company === 'string' ? company : null,
+        role: typeof role === 'string' ? role : null,
+        edited: false,
+        updated_at: new Date().toISOString(),
+      }, { onConflict: 'user_id,jd_hash,profile_hash' })
+      .select('id, footer')
+      .single();
+
+    if (saveErr) console.warn('[/cover-letter/claude] failed to persist:', saveErr.message);
+
+    console.log(`[/cover-letter/claude] userId=${userId} len=${coverLetter.length} id=${saved?.id ?? 'n/a'}`);
+    return res.json({ success: true, id: saved?.id ?? null, coverLetter, footer: saved?.footer ?? null, fromCache: false });
+  } catch (err: any) {
+    console.error('[/cover-letter/claude] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// GET /cover-letter?applicationId=<id> — load a saved letter for an application.
+// Read-only, never calls Claude. Returns { coverLetter: null } when none exists.
+app.get('/cover-letter', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const applicationId = typeof req.query.applicationId === 'string' ? req.query.applicationId : '';
+
+  if (!applicationId) {
+    return res.status(400).json({ success: false, error: 'applicationId is required' });
+  }
+
+  const { data, error } = await authClient
+    .from('cover_letters')
+    .select('id, cover_letter, footer')
+    .eq('user_id', userId)
+    .eq('application_id', applicationId)
+    .order('updated_at', { ascending: false })
+    .limit(1)
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  return res.json({ success: true, id: data?.id ?? null, coverLetter: data?.cover_letter ?? null, footer: data?.footer ?? null });
+});
+
+// PATCH /cover-letter/:id — durably save a user edit to a cover letter.
+// Body: { coverLetter?: string, footer?: string } — updates whichever is provided.
+// Editing the letter body flags the row edited so a later regenerate knows the
+// stored text is a manual edit, not a cache hit. (A footer-only edit does not.)
+app.patch('/cover-letter/:id', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { id } = req.params;
+  const { coverLetter, footer } = req.body;
+
+  const update: Record<string, unknown> = { updated_at: new Date().toISOString() };
+  if (typeof coverLetter === 'string') {
+    update.cover_letter = sanitizeResumeText(coverLetter);
+    update.edited = true;
+  }
+  if (typeof footer === 'string') {
+    update.footer = sanitizeResumeText(footer);
+  }
+
+  if (update.cover_letter === undefined && update.footer === undefined) {
+    return res.status(400).json({ success: false, error: 'coverLetter or footer is required' });
+  }
+
+  const { data, error } = await authClient
+    .from('cover_letters')
+    .update(update)
+    .eq('id', id)
+    .eq('user_id', userId)
+    .select('id')
+    .maybeSingle();
+
+  if (error) return res.status(500).json({ success: false, error: error.message });
+  if (!data) return res.status(404).json({ success: false, error: 'Cover letter not found' });
+  return res.json({ success: true, id: data.id });
+});
+
+// POST /cover-letter/pdf — render the current (edited) letter + footer to a
+// business-letter PDF. Letterhead identity comes from the Master Profile header
+// (server-side), so it matches the resume. Reuses the resume PDF pipeline
+// (coverLetterToHtml -> generatePdf, text-native + regression-guarded).
+// Body: { coverLetter: string, footer?: string, company?: string, role?: string, applicationId?: string }
+app.post('/cover-letter/pdf', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { coverLetter, footer, company, role, applicationId } = req.body;
+
+  if (!coverLetter || typeof coverLetter !== 'string' || !coverLetter.trim()) {
+    return res.status(400).json({ success: false, error: 'coverLetter is required' });
+  }
+
+  // Letterhead identity — pulled from the Master Profile header server-side.
+  const { data: profileRow, error: profileErr } = await authClient
+    .from('master_profile')
+    .select('content')
+    .eq('user_id', userId)
+    .maybeSingle();
+  if (profileErr) return res.status(500).json({ success: false, error: profileErr.message });
+
+  const h = (profileRow?.content?.header ?? {}) as Record<string, string>;
+  const header = {
+    name: h.name ?? '',
+    phone: h.phone ?? '',
+    email: h.email ?? '',
+    linkedin: h.linkedin ?? '',
+    portfolio: h.portfolio ?? '',
+  };
+
+  // Company / role: an applicationId is authoritative; otherwise use the body.
+  let resolvedCompany = typeof company === 'string' ? company : '';
+  let resolvedRole = typeof role === 'string' ? role : '';
+  if (typeof applicationId === 'string' && applicationId) {
+    const { data: app } = await authClient
+      .from('applications')
+      .select('company, position')
+      .eq('user_id', userId)
+      .eq('id', applicationId)
+      .maybeSingle();
+    if (app?.company) resolvedCompany = app.company;
+    if (app?.position) resolvedRole = app.position;
+  }
+
+  try {
+    const html = coverLetterToHtml({
+      header,
+      body: coverLetter,
+      footer: typeof footer === 'string' ? footer : undefined,
+      company: resolvedCompany,
+      role: resolvedRole,
+    });
+
+    // The PDF regression guard (assertTextLayer) wants the candidate name + >=5
+    // real keywords in the extracted text. Feed it a synthetic resume-shaped
+    // object whose keywords are genuine words from the letter, so the guard
+    // legitimately validates the letter has an ATS-readable text layer.
+    const keywords = Array.from(new Set(
+      coverLetter.toLowerCase().match(/[a-z]{4,14}/g) ?? [],
+    )).slice(0, 15).join(', ');
+
+    const guardContent = {
+      header: { name: header.name, title: '', phone: '', email: '', linkedin: '', github: '', portfolio: '' },
+      summary: '',
+      showSummary: false,
+      sections: [
+        { id: 'cl', type: 'skills', title: 'Letter', visible: true, items: [{ id: 'kw', category: 'Letter', items: keywords }] },
+      ],
+    };
+
+    const pdfBuffer = await generatePdf(html, guardContent);
+
+    const slug = (resolvedCompany || resolvedRole || 'cover-letter').replace(/[^a-z0-9]+/gi, '-').toLowerCase();
+    res.set({
+      'Content-Type': 'application/pdf',
+      'Content-Disposition': `attachment; filename="${slug}-cover-letter.pdf"`,
+      'Content-Length': pdfBuffer.length,
+    });
+    return res.end(pdfBuffer);
+  } catch (err: any) {
+    console.error('[/cover-letter/pdf] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });

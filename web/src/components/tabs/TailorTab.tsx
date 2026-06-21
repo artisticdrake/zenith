@@ -3,6 +3,7 @@ import {
   Wand2, Loader2, XCircle, Sparkles, ArrowRight, RefreshCw,
   ChevronDown, ChevronUp, RotateCcw,
   Lightbulb, Copy, Check, CheckSquare, Square,
+  FileText, Mail, Download,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -336,12 +337,336 @@ function FitDashboard({ review }: { review: ClaudeReview }) {
   );
 }
 
+// ── Cover Letter panel ────────────────────────────────────────────────────────
+// Generates a job-specific cover letter from the Master Profile + JD (server-side).
+// Durable content lives in the DB: on open it loads any saved letter for the linked
+// application (GET), and user edits are debounce-saved (PATCH). It never
+// auto-generates — generation is an explicit button click.
+
+function CoverLetterPanel({
+  jobDescription,
+  applicationId,
+  company,
+  role,
+  accessToken,
+}: {
+  jobDescription: string;
+  applicationId: string;
+  company?: string;
+  role?: string;
+  accessToken?: string;
+}) {
+  const [coverLetter, setCoverLetter] = useState("");
+  const [footer, setFooter] = useState("");
+  // Role/company are prefilled from autofill (props) but user-editable, so the
+  // user can supply a role when extraction missed it. They drive both Generate
+  // and Download PDF.
+  const [roleInput, setRoleInput] = useState(role ?? "");
+  const [companyInput, setCompanyInput] = useState(company ?? "");
+  const [letterId, setLetterId] = useState<string | null>(null);
+  const [generating, setGenerating] = useState(false);
+  const [loadingExisting, setLoadingExisting] = useState(false);
+  const [downloadingPdf, setDownloadingPdf] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [copied, setCopied] = useState(false);
+  const [saveState, setSaveState] = useState<"idle" | "saving" | "saved">("idle");
+
+  // Guards so the debounced PATCH never fires for the just-loaded/generated text.
+  const lastSavedLetter = useRef<string>("");
+  const lastSavedFooter = useRef<string>("");
+  const saveTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
+
+  // Re-prefill role/company when the linked application (and thus autofill) changes.
+  useEffect(() => { setRoleInput(role ?? ""); }, [role]);
+  useEffect(() => { setCompanyInput(company ?? ""); }, [company]);
+
+  // ── Load any saved letter for the linked application (no Claude call) ────────
+  useEffect(() => {
+    let cancelled = false;
+    if (!applicationId || !accessToken) return;
+    setLoadingExisting(true);
+    setError(null);
+    (async () => {
+      try {
+        const res = await fetch(`${API}/cover-letter?applicationId=${encodeURIComponent(applicationId)}`, {
+          headers: { Authorization: `Bearer ${accessToken}` },
+        });
+        const data = await res.json();
+        if (cancelled) return;
+        if (data.success && typeof data.coverLetter === "string") {
+          setCoverLetter(data.coverLetter);
+          setFooter(data.footer ?? "");
+          setLetterId(data.id ?? null);
+          lastSavedLetter.current = data.coverLetter;
+          lastSavedFooter.current = data.footer ?? "";
+        }
+      } catch {
+        /* non-fatal — user can still generate */
+      } finally {
+        if (!cancelled) setLoadingExisting(false);
+      }
+    })();
+    return () => { cancelled = true; };
+  }, [applicationId, accessToken]);
+
+  // ── Debounced durable save of edits (PATCH) ─────────────────────────────────
+  // Sends only the field(s) that actually changed, so a footer-only edit never
+  // flips the letter's `edited` flag on the server.
+  useEffect(() => {
+    if (!letterId) return;                         // nothing persisted yet to update
+    const letterChanged = coverLetter !== lastSavedLetter.current;
+    const footerChanged = footer !== lastSavedFooter.current;
+    if (!letterChanged && !footerChanged) return;
+    setSaveState("saving");
+    if (saveTimer.current) clearTimeout(saveTimer.current);
+    saveTimer.current = setTimeout(async () => {
+      const payload: { coverLetter?: string; footer?: string } = {};
+      if (letterChanged) payload.coverLetter = coverLetter;
+      if (footerChanged) payload.footer = footer;
+      try {
+        const res = await fetch(`${API}/cover-letter/${letterId}`, {
+          method: "PATCH",
+          headers: {
+            "Content-Type": "application/json",
+            Authorization: `Bearer ${accessToken}`,
+          },
+          body: JSON.stringify(payload),
+        });
+        const data = await res.json();
+        if (data.success) {
+          lastSavedLetter.current = coverLetter;
+          lastSavedFooter.current = footer;
+          setSaveState("saved");
+          setTimeout(() => setSaveState(s => (s === "saved" ? "idle" : s)), 1500);
+        } else {
+          setSaveState("idle");
+        }
+      } catch {
+        setSaveState("idle");
+      }
+    }, 800);
+    return () => { if (saveTimer.current) clearTimeout(saveTimer.current); };
+  }, [coverLetter, footer, letterId, accessToken]);
+
+  const handleGenerate = useCallback(async () => {
+    if (!jobDescription.trim()) return;
+    setGenerating(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/cover-letter/claude`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          jobDescription,
+          applicationId: applicationId || undefined,
+          company: companyInput.trim() || undefined,
+          role: roleInput.trim() || undefined,
+        }),
+      });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || "Generation failed.");
+      setCoverLetter(data.coverLetter ?? "");
+      setFooter(data.footer ?? "");
+      setLetterId(data.id ?? null);
+      lastSavedLetter.current = data.coverLetter ?? "";
+      lastSavedFooter.current = data.footer ?? "";
+    } catch (e: any) {
+      setError(e?.message || "Generation failed.");
+    } finally {
+      setGenerating(false);
+    }
+  }, [jobDescription, applicationId, companyInput, roleInput, accessToken]);
+
+  const handleCopy = useCallback(async () => {
+    try {
+      await navigator.clipboard.writeText(coverLetter);
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch { /* clipboard blocked */ }
+  }, [coverLetter]);
+
+  // Renders the CURRENT edited body + footer to a business-letter PDF server-side
+  // (letterhead identity comes from the Master Profile), then downloads it.
+  const handleDownloadPdf = useCallback(async () => {
+    if (!coverLetter.trim()) return;
+    setDownloadingPdf(true);
+    setError(null);
+    try {
+      const res = await fetch(`${API}/cover-letter/pdf`, {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          Authorization: `Bearer ${accessToken}`,
+        },
+        body: JSON.stringify({
+          coverLetter,
+          footer,
+          company: companyInput.trim() || undefined,
+          role: roleInput.trim() || undefined,
+          applicationId: applicationId || undefined,
+        }),
+      });
+      if (!res.ok) {
+        let msg = "PDF export failed.";
+        try { msg = (await res.json()).error || msg; } catch { /* non-JSON error body */ }
+        throw new Error(msg);
+      }
+      const blob = await res.blob();
+      const url = URL.createObjectURL(blob);
+      const a = document.createElement("a");
+      const slug = (companyInput.trim() || roleInput.trim() || "cover-letter").replace(/[^a-z0-9]+/gi, "-").toLowerCase();
+      a.href = url;
+      a.download = `${slug}-cover-letter.pdf`;
+      a.click();
+      URL.revokeObjectURL(url);
+    } catch (e: any) {
+      setError(e?.message || "PDF export failed.");
+    } finally {
+      setDownloadingPdf(false);
+    }
+  }, [coverLetter, footer, companyInput, roleInput, applicationId, accessToken]);
+
+  const hasLetter = coverLetter.trim().length > 0;
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-5 space-y-4">
+      <div className="flex items-center justify-between">
+        <div className="flex items-center gap-2">
+          <Mail className="h-4 w-4 text-primary" />
+          <h3 className="font-semibold text-sm text-foreground">Cover Letter</h3>
+          {loadingExisting && <Loader2 className="h-3.5 w-3.5 animate-spin text-muted-foreground" />}
+        </div>
+        {hasLetter && (
+          <button
+            onClick={handleGenerate}
+            disabled={generating || !jobDescription.trim()}
+            className="text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1 transition-colors disabled:opacity-50"
+          >
+            <RefreshCw className="h-3 w-3" />Re-generate
+          </button>
+        )}
+      </div>
+
+      <p className="text-[11px] text-muted-foreground -mt-1">
+        Written from your Master Profile and the job description. Generate, then tweak freely; edits save automatically.
+      </p>
+
+      {/* Role / Company — prefilled from autofill, editable. Supply a role here if
+          extraction missed it so the letter names it instead of staying generic. */}
+      <div className="grid grid-cols-2 gap-2">
+        <div>
+          <label className="text-[11px] text-muted-foreground font-label uppercase tracking-wider mb-1 block">
+            Role (optional)
+          </label>
+          <input
+            type="text"
+            value={roleInput}
+            onChange={e => setRoleInput(e.target.value)}
+            placeholder="e.g. AI Engineer"
+            className="w-full h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+        <div>
+          <label className="text-[11px] text-muted-foreground font-label uppercase tracking-wider mb-1 block">
+            Company (optional)
+          </label>
+          <input
+            type="text"
+            value={companyInput}
+            onChange={e => setCompanyInput(e.target.value)}
+            placeholder="e.g. Anthropic"
+            className="w-full h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+          />
+        </div>
+      </div>
+
+      {!hasLetter && (
+        <Button
+          onClick={handleGenerate}
+          disabled={!jobDescription.trim() || generating}
+          className="w-full"
+        >
+          {generating
+            ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Claude is writing…</>
+            : <><Sparkles className="h-4 w-4 mr-2" />Generate Cover Letter</>}
+        </Button>
+      )}
+
+      {!jobDescription.trim() && (
+        <p className="text-[11px] text-muted-foreground">Paste a job description above to generate a cover letter.</p>
+      )}
+
+      {hasLetter && (
+        <>
+          <textarea
+            value={coverLetter}
+            onChange={e => setCoverLetter(e.target.value)}
+            rows={18}
+            className="w-full rounded-lg border border-border bg-muted/20 p-3.5 text-[12.5px] text-foreground leading-relaxed focus:outline-none focus:ring-1 focus:ring-primary resize-y min-h-[300px]"
+          />
+
+          {/* Signature line — a credential rendered UNDER the name in the PDF.
+              Must NOT contain the name (the template renders the name itself). */}
+          <div>
+            <label className="text-[11px] text-muted-foreground font-label uppercase tracking-wider mb-1.5 block">
+              Signature line (optional) — credential printed under your name
+            </label>
+            <input
+              type="text"
+              value={footer}
+              onChange={e => setFooter(e.target.value)}
+              placeholder="e.g. M.S. Computer Science, 2026 (do not include your name)"
+              className="w-full h-9 rounded-lg border border-border bg-muted/20 px-2.5 text-[11.5px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-primary"
+            />
+          </div>
+
+          <div className="flex items-center gap-2">
+            <span className="text-[10.5px] text-muted-foreground">
+              {saveState === "saving" ? "Saving…" : saveState === "saved" ? "Saved" : ""}
+            </span>
+            <button
+              onClick={handleCopy}
+              className="ml-auto text-[11px] text-muted-foreground hover:text-foreground flex items-center gap-1.5 transition-colors"
+            >
+              {copied ? <Check className="h-3.5 w-3.5" /> : <Copy className="h-3.5 w-3.5" />}
+              {copied ? "Copied" : "Copy"}
+            </button>
+            <Button
+              size="sm"
+              variant="outline"
+              onClick={handleDownloadPdf}
+              disabled={downloadingPdf}
+              className="h-8 text-[11px]"
+            >
+              {downloadingPdf
+                ? <><Loader2 className="h-3.5 w-3.5 animate-spin mr-1.5" />Rendering…</>
+                : <><Download className="h-3.5 w-3.5 mr-1.5" />Download PDF</>}
+            </Button>
+          </div>
+        </>
+      )}
+
+      {error && (
+        <p className="text-[12px] text-destructive flex items-center gap-1.5">
+          <XCircle className="h-3.5 w-3.5 shrink-0" />{error}
+        </p>
+      )}
+    </div>
+  );
+}
+
 // ── Main Component ────────────────────────────────────────────────────────────
+
+type SubTab = "resume" | "cover";
 
 function readSession(): {
   jobDescription?: string;
   linkedAppId?: string;
   result?: ClaudeResult | null;
+  subTab?: SubTab;
 } {
   try {
     const raw = sessionStorage.getItem(SESSION_KEY);
@@ -360,6 +685,7 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
 
   const [jdText, setJdText] = useState(saved.jobDescription ?? "");
   const [linkedAppId, setLinkedAppId] = useState(saved.linkedAppId ?? "");
+  const [subTab, setSubTab] = useState<SubTab>(saved.subTab ?? "resume");
   const [generating, setGenerating] = useState(false);
   const [genError, setGenError] = useState<string | null>(null);
   const [result, setResult] = useState<ClaudeResult | null>(saved.result ?? null);
@@ -375,9 +701,10 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
         jobDescription: jdText,
         linkedAppId,
         result,
+        subTab,
       }));
     } catch {}
-  }, [jdText, linkedAppId, result]);
+  }, [jdText, linkedAppId, result, subTab]);
 
   const appsWithJd = apps.filter(a => a.jobDescription?.trim());
 
@@ -525,8 +852,41 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
         )}
       </div>
 
+      {/* ── Sub-tab bar: Resume | Cover Letter ───────────────────────────────── */}
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+        <button
+          onClick={() => setSubTab("resume")}
+          className={cn(
+            "flex-1 flex items-center justify-center gap-1.5 h-8 rounded-md text-[12px] font-medium transition-colors",
+            subTab === "resume" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <FileText className="h-3.5 w-3.5" />Resume
+        </button>
+        <button
+          onClick={() => setSubTab("cover")}
+          className={cn(
+            "flex-1 flex items-center justify-center gap-1.5 h-8 rounded-md text-[12px] font-medium transition-colors",
+            subTab === "cover" ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+          )}
+        >
+          <Mail className="h-3.5 w-3.5" />Cover Letter
+        </button>
+      </div>
+
+      {/* ── Cover Letter tab ─────────────────────────────────────────────────── */}
+      {subTab === "cover" && (
+        <CoverLetterPanel
+          jobDescription={jdText}
+          applicationId={linkedAppId}
+          company={linkedAppId ? apps.find(a => a.id === linkedAppId)?.company : undefined}
+          role={linkedAppId ? apps.find(a => a.id === linkedAppId)?.position : undefined}
+          accessToken={session?.access_token}
+        />
+      )}
+
       {/* ── Generating state ─────────────────────────────────────────────────── */}
-      {generating && (
+      {subTab === "resume" && generating && (
         <div className="rounded-xl border border-border bg-card p-8 flex flex-col items-center gap-3">
           <Loader2 className="h-8 w-8 animate-spin text-primary" />
           <p className="text-sm text-muted-foreground">Claude is tailoring your resume…</p>
@@ -537,7 +897,7 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
       )}
 
       {/* ── Claude result panel ───────────────────────────────────────────────── */}
-      {result && (
+      {subTab === "resume" && result && (
         <div className="rounded-xl border border-border bg-card p-5 space-y-5">
 
           {/* Header */}

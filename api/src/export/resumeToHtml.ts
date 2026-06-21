@@ -166,15 +166,15 @@ function renderExperienceItem(item: ResumeSectionItem, fs: number, ls: number): 
 
   const row1 = (item.organization || item.date)
     ? `<div style="display:flex;justify-content:space-between;align-items:baseline">
-         <span style="font-weight:bold;font-size:${fs}pt">${esc(item.organization)}</span>
-         <span style="font-weight:bold;font-size:${fs}pt">${esc(item.date)}</span>
+         <span style="font-weight:bold;font-size:${fs}pt;flex:1 1 auto;min-width:0;padding-right:${fs * 0.5}pt">${esc(item.organization)}</span>
+         <span style="font-weight:bold;font-size:${fs}pt;white-space:nowrap;flex-shrink:0">${esc(item.date)}</span>
        </div>`
     : '';
 
   const row2 = (item.role || item.location)
     ? `<div style="display:flex;justify-content:space-between;align-items:baseline">
-         <span style="font-style:italic;font-size:${fs}pt">${esc(item.role)}</span>
-         <span style="font-style:italic;font-size:${fs}pt">${esc(item.location)}</span>
+         <span style="font-style:italic;font-size:${fs}pt;flex:1 1 auto;min-width:0;padding-right:${fs * 0.5}pt">${esc(item.role)}</span>
+         <span style="font-style:italic;font-size:${fs}pt;white-space:nowrap;flex-shrink:0">${esc(item.location)}</span>
        </div>`
     : '';
 
@@ -196,8 +196,8 @@ function renderProjectItem(item: ResumeSectionItem, fs: number, ls: number): str
 
   const row1 = (item.projectName || item.techStack || item.dateRange)
     ? `<div style="display:flex;justify-content:space-between;align-items:baseline">
-         <span style="font-size:${fs}pt">${nameAndStack}</span>
-         <span style="font-weight:bold;font-size:${fs}pt">${esc(item.dateRange)}</span>
+         <span style="font-size:${fs}pt;flex:1 1 auto;min-width:0;padding-right:${fs * 0.5}pt">${nameAndStack}</span>
+         <span style="font-weight:bold;font-size:${fs}pt;white-space:nowrap;flex-shrink:0">${esc(item.dateRange)}</span>
        </div>`
     : '';
 
