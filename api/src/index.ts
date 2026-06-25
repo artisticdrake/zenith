@@ -1437,82 +1437,215 @@ function scoredJobFields(review: any) {
   };
 }
 
+// ── Internal machine-path hardening (Phase 2 prep) ─────────────────────────────
+// Shared by /internal/score-job (singular) and /internal/score-jobs (batch). All
+// of this is ADDITIVE: scoring logic and the auth model are unchanged.
+
+// Shared guard for the internal endpoints. Validates the shared-secret header and
+// that the server is configured, then returns the server-side owner + Anthropic
+// key. On any failure it sends the (unchanged) error response and returns null, so
+// the singular endpoint keeps its exact status codes for backward compat.
+function resolveInternalAuth(
+  req: express.Request, res: express.Response,
+): { ownerId: string; apiKey: string } | null {
+  const expectedKey = process.env.INTERNAL_API_KEY;
+  if (!expectedKey) {
+    res.status(500).json({ success: false, error: 'INTERNAL_API_KEY is not configured on the server.' });
+    return null;
+  }
+  if (req.header('x-internal-key') !== expectedKey) {
+    res.status(401).json({ success: false, error: 'Invalid internal key' });
+    return null;
+  }
+  const ownerId = process.env.INTERNAL_USER_ID;
+  if (!ownerId) {
+    res.status(500).json({ success: false, error: 'INTERNAL_USER_ID is not configured on the server.' });
+    return null;
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+    return null;
+  }
+  return { ownerId, apiKey };
+}
+
+// Input-safety helpers for scraper traffic.
+const INTERNAL_JD_MAX = 15000; // cap so one runaway paste can't blow up token cost
+// Known scrape sources; anything else is normalized to 'other' rather than stored raw.
+const KNOWN_SOURCES = new Set(['manual', 'wellfound', 'builtin', 'linkedin', 'indeed', 'glassdoor', 'apify', 'n8n', 'other']);
+const normalizeSource = (s: any): string => (typeof s === 'string' && KNOWN_SOURCES.has(s) ? s : 'other');
+// Trim, drop blanks (→ ''), and truncate over the cap. The stored (possibly
+// truncated) text is what gets hashed, so dedupe stays consistent.
+const cleanJdText = (jd: any): string => {
+  if (typeof jd !== 'string') return '';
+  const t = jd.trim();
+  return t.length > INTERNAL_JD_MAX ? t.slice(0, INTERNAL_JD_MAX) : t;
+};
+// Accept a caller-provided posted_at only if it parses as a real date.
+const postedAtOrNull = (v: any): string | null => {
+  if (typeof v !== 'string' || !v.trim()) return null;
+  const ms = Date.parse(v);
+  return Number.isFinite(ms) ? new Date(ms).toISOString() : null;
+};
+
+// Dedupe-aware score for ONE inline job under the configured owner — the core
+// shared by both internal endpoints. Caller must pass a non-empty cleaned jd_text
+// (via cleanJdText) and the owner's loaded master profile. DEDUPE: if a row for
+// (owner, jd_hash) is already status='scored', it is returned untouched with
+// deduped:true and the scorer is NOT called (re-scraped postings cost nothing).
+async function scoreInlineJobForOwner(
+  ownerId: string, apiKey: string, lib: any,
+  input: { jd_text: string; title?: any; company?: any; location?: any; url?: any; source?: any; posted_at?: any },
+): Promise<{ jd_hash: string; status: string; match_score: number | null; deduped: boolean; job: any }> {
+  const jdText = cleanJdText(input.jd_text);
+  const jdHash = hashJD(jdText);
+
+  const { data: existing, error: exErr } = await supabase
+    .from('scraped_jobs').select('*').eq('user_id', ownerId).eq('jd_hash', jdHash).maybeSingle();
+  if (exErr) throw new Error(exErr.message);
+  if (existing && existing.status === 'scored') {
+    return { jd_hash: jdHash, status: existing.status, match_score: existing.match_score, deduped: true, job: existing };
+  }
+
+  // Insert new / refresh an unscored row's metadata, then score it.
+  const { data: job, error: upErr } = await supabase
+    .from('scraped_jobs')
+    .upsert({
+      user_id: ownerId,
+      source: normalizeSource(input.source),
+      title: typeof input.title === 'string' ? input.title : null,
+      company: typeof input.company === 'string' ? input.company : null,
+      location: typeof input.location === 'string' ? input.location : null,
+      url: typeof input.url === 'string' ? input.url : null,
+      posted_at: postedAtOrNull(input.posted_at),
+      jd_text: jdText,
+      jd_hash: jdHash,
+    }, { onConflict: 'user_id,jd_hash' })
+    .select().single();
+  if (upErr) throw new Error(upErr.message);
+
+  const review = await runProfileScorer(lib, job.jd_text, apiKey);
+  const { data: updated, error: updErr } = await supabase
+    .from('scraped_jobs')
+    .update(scoredJobFields(review))
+    .eq('id', job.id).eq('user_id', ownerId).select().single();
+  if (updErr) throw new Error(updErr.message);
+
+  return { jd_hash: jdHash, status: updated.status, match_score: updated.match_score, deduped: false, job: updated };
+}
+
+// Load the owner's master profile (service-role), or send a 400 and return null
+// if it's empty (can't score against nothing). Shared by both internal endpoints.
+async function loadOwnerProfileOr400(ownerId: string, res: express.Response): Promise<any | null> {
+  const { data: profileRow } = await supabase
+    .from('master_profile').select('content').eq('user_id', ownerId).maybeSingle();
+  const lib = profileRow?.content;
+  if (!lib?.experiences?.length && !lib?.projects?.length) {
+    res.status(400).json({ success: false, error: 'Owner master profile is empty; cannot score.' });
+    return null;
+  }
+  return lib;
+}
+
 // ── POST /internal/score-job ──────────────────────────────────────────────────
 // Machine-auth path for Phase 2 (n8n / Apify). Authed by a shared secret in the
 // 'x-internal-key' header; the OWNER is derived from INTERNAL_USER_ID server-side
 // and is NEVER read from the body. Body: { jobId } OR { jd_text, title, company,
-// location, url, source }. Uses the service-role client but never trusts a
-// client-supplied owner. curl-testable so Phase 2 can point at a proven endpoint.
+// location, url, source, posted_at }. The inline path is dedupe-aware + input-safe;
+// the jobId path always re-scores (explicit request) for backward compat.
 app.post('/internal/score-job', async (req, res) => {
-  const expectedKey = process.env.INTERNAL_API_KEY;
-  if (!expectedKey) {
-    return res.status(500).json({ success: false, error: 'INTERNAL_API_KEY is not configured on the server.' });
-  }
-  if (req.header('x-internal-key') !== expectedKey) {
-    return res.status(401).json({ success: false, error: 'Invalid internal key' });
-  }
-  const ownerId = process.env.INTERNAL_USER_ID;
-  if (!ownerId) {
-    return res.status(500).json({ success: false, error: 'INTERNAL_USER_ID is not configured on the server.' });
-  }
-  const apiKey = process.env.ANTHROPIC_API_KEY;
-  if (!apiKey) {
-    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
-  }
+  const auth = resolveInternalAuth(req, res);
+  if (!auth) return;
+  const { ownerId, apiKey } = auth;
 
-  const { jobId, jd_text, title, company, location, url, source } = req.body ?? {};
+  const { jobId, jd_text, title, company, location, url, source, posted_at } = req.body ?? {};
 
   try {
-    // Resolve the job row: an existing jobId (owned by the configured owner) OR an
-    // inline JD we upsert first. user_id is ALWAYS the server-side owner.
-    let job: any = null;
+    const lib = await loadOwnerProfileOr400(ownerId, res);
+    if (!lib) return;
+
+    // Backward-compat: explicit re-score of an existing owned row (always scores).
     if (typeof jobId === 'string' && jobId) {
-      const { data, error } = await supabase
+      const { data: job, error } = await supabase
         .from('scraped_jobs').select('*').eq('id', jobId).eq('user_id', ownerId).maybeSingle();
       if (error) return res.status(500).json({ success: false, error: error.message });
-      if (!data) return res.status(404).json({ success: false, error: 'Job not found for the configured owner.' });
-      job = data;
-    } else {
-      if (!jd_text || typeof jd_text !== 'string' || !jd_text.trim()) {
-        return res.status(400).json({ success: false, error: 'jobId or jd_text is required' });
-      }
-      const { data, error } = await supabase
+      if (!job) return res.status(404).json({ success: false, error: 'Job not found for the configured owner.' });
+
+      const review = await runProfileScorer(lib, job.jd_text, apiKey);
+      const { data: updated, error: updErr } = await supabase
         .from('scraped_jobs')
-        .upsert({
-          user_id: ownerId,
-          source: typeof source === 'string' ? source : 'manual',
-          title: typeof title === 'string' ? title : null,
-          company: typeof company === 'string' ? company : null,
-          location: typeof location === 'string' ? location : null,
-          url: typeof url === 'string' ? url : null,
-          jd_text,
-          jd_hash: hashJD(jd_text),
-        }, { onConflict: 'user_id,jd_hash' })
-        .select().single();
-      if (error) return res.status(500).json({ success: false, error: error.message });
-      job = data;
+        .update(scoredJobFields(review))
+        .eq('id', job.id).eq('user_id', ownerId).select().single();
+      if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+      console.log(`[/internal/score-job] ownerId=${ownerId} jobId=${updated.id} match=${updated.match_score} verdict=${updated.bucket_verdict} deduped=false`);
+      return res.json({ success: true, job: updated, deduped: false });
     }
 
-    // Score the OWNER's master profile (service-role) against the JD.
-    const { data: profileRow } = await supabase
-      .from('master_profile').select('content').eq('user_id', ownerId).maybeSingle();
-    const lib = profileRow?.content;
-    if (!lib?.experiences?.length && !lib?.projects?.length) {
-      return res.status(400).json({ success: false, error: 'Owner master profile is empty; cannot score.' });
+    // Inline JD: dedupe-aware upsert + score.
+    if (!cleanJdText(jd_text)) {
+      return res.status(400).json({ success: false, error: 'jobId or jd_text is required' });
     }
-
-    const review = await runProfileScorer(lib, job.jd_text, apiKey);
-
-    const { data: updated, error: updErr } = await supabase
-      .from('scraped_jobs')
-      .update(scoredJobFields(review))
-      .eq('id', job.id).eq('user_id', ownerId).select().single();
-    if (updErr) return res.status(500).json({ success: false, error: updErr.message });
-
-    console.log(`[/internal/score-job] ownerId=${ownerId} jobId=${updated.id} match=${updated.match_score} verdict=${updated.bucket_verdict}`);
-    return res.json({ success: true, job: updated });
+    const result = await scoreInlineJobForOwner(ownerId, apiKey, lib, { jd_text, title, company, location, url, source, posted_at });
+    console.log(`[/internal/score-job] ownerId=${ownerId} jobId=${result.job.id} match=${result.match_score} verdict=${result.job.bucket_verdict} deduped=${result.deduped}`);
+    return res.json({ success: true, job: result.job, deduped: result.deduped });
   } catch (err: any) {
     console.error('[/internal/score-job] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /internal/score-jobs (batch) ──────────────────────────────────────────
+// Batch sibling of /internal/score-job: a scraper hands off a whole morning's
+// scrape in one call. Same x-internal-key auth + INTERNAL_USER_ID owner. Body:
+// { jobs: [{ jd_text, title?, company?, location?, url?, source?, posted_at? }, ...] }.
+// Scores sequentially and is fault-isolated: a blank jd_text is reported
+// { status:'skipped' } and a job that throws is reported { status:'error', error }
+// — neither fails the batch. Dedupe-aware (already-scored postings return free).
+// Guarded by INTERNAL_BATCH_MAX (default 150): a larger batch is rejected 400 so a
+// runaway scrape can't fan out into hundreds of scorer calls by accident.
+app.post('/internal/score-jobs', async (req, res) => {
+  const auth = resolveInternalAuth(req, res);
+  if (!auth) return;
+  const { ownerId, apiKey } = auth;
+
+  const batchMax = Number(process.env.INTERNAL_BATCH_MAX) || 150;
+  const jobs = Array.isArray(req.body?.jobs) ? req.body.jobs : null;
+  if (!jobs || jobs.length === 0) {
+    return res.status(400).json({ success: false, error: 'jobs must be a non-empty array' });
+  }
+  if (jobs.length > batchMax) {
+    return res.status(400).json({ success: false, error: `Batch of ${jobs.length} exceeds INTERNAL_BATCH_MAX (${batchMax}).` });
+  }
+
+  try {
+    const lib = await loadOwnerProfileOr400(ownerId, res);
+    if (!lib) return;
+
+    const results: any[] = [];
+    let scored = 0, deduped = 0, skipped = 0, errored = 0;
+    for (const j of jobs) {
+      const jdText = cleanJdText(j?.jd_text);
+      if (!jdText) {
+        results.push({ jd_hash: null, status: 'skipped', error: 'jd_text is empty' });
+        skipped++;
+        continue;
+      }
+      try {
+        const r = await scoreInlineJobForOwner(ownerId, apiKey, lib, { ...j, jd_text: jdText });
+        results.push({ jd_hash: r.jd_hash, status: r.status, match_score: r.match_score, deduped: r.deduped });
+        if (r.deduped) deduped++; else scored++;
+      } catch (err: any) {
+        results.push({ jd_hash: null, status: 'error', error: err.message });
+        errored++;
+      }
+    }
+
+    console.log(`[/internal/score-jobs] ownerId=${ownerId} count=${jobs.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
+    return res.json({ success: true, count: jobs.length, scored, deduped, skipped, errored, results });
+  } catch (err: any) {
+    console.error('[/internal/score-jobs] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
