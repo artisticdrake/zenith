@@ -31,6 +31,248 @@ const hashProfile = (lib: unknown) => sha(JSON.stringify(lib ?? {}));
 // exposes — so a score keyed on it always matches what a recruiter's parser reads.
 const hashContent = (rc: unknown) => sha(resumeContentToText(rc as any));
 
+// ── Claude helpers (shared cores) ─────────────────────────────────────────────
+// The tailor / scorer / assembler / cover-letter routes and the new job-triage
+// routes all talk to Claude the SAME way: claude-sonnet-4-6, temperature 0,
+// defensive JSON parse (strip fences, then regex-extract the object). Factored
+// here so every path is identical and there is one place to change it. The
+// prompt copy itself still lives only in lib/prompts.ts.
+async function callClaudeJSON(apiKey: string, system: string, user: string, maxTokens: number): Promise<any> {
+  const response = await fetch('https://api.anthropic.com/v1/messages', {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      'x-api-key': apiKey,
+      'anthropic-version': '2023-06-01',
+    },
+    body: JSON.stringify({
+      model: 'claude-sonnet-4-6',
+      max_tokens: maxTokens,
+      temperature: 0,
+      system,
+      messages: [{ role: 'user', content: user }],
+    }),
+  });
+
+  const responseData = await response.json() as any;
+  if (!response.ok) {
+    throw new Error(responseData?.error?.message || 'Claude API error');
+  }
+
+  const rawText: string = responseData?.content?.[0]?.text ?? '';
+  try {
+    const cleaned = rawText
+      .replace(/^```(?:json)?\s*/m, '')
+      .replace(/\s*```\s*$/m, '')
+      .trim();
+    return JSON.parse(cleaned);
+  } catch {
+    const match = rawText.match(/\{[\s\S]*\}/);
+    if (!match) throw new Error('Claude returned malformed JSON');
+    return JSON.parse(match[0]);
+  }
+}
+
+// Score the candidate's MASTER PROFILE (rendered to the same plain text Mira
+// uses) against a JD, calling buildScorerPrompt exactly as /rerank/claude does
+// (same model, max_tokens 3000, temperature 0, parse, normalizeReview). This is
+// the "should this candidate apply" triage score, computed before any resume
+// exists — shared by /internal/score-job and /jobs/:id/score so a board score
+// matches what the standalone scorer would produce for the same JD.
+async function runProfileScorer(lib: any, jdText: string, apiKey: string): Promise<any> {
+  const resumeText = masterProfileToText(lib ?? {});
+  const { system, user } = buildScorerPrompt(jdText, resumeText);
+  const parsed = await callClaudeJSON(apiKey, system, user, 3000);
+  // Use the RAW scorer review: normalizeReview whitelists only the tailor/builder
+  // UI fields and drops atsScore / recruiterScore / bucketFit / laneWarning, which
+  // the triage board needs. We only sanitize the paste-ready bullets.
+  const review = (parsed && typeof parsed === 'object' && parsed.review && typeof parsed.review === 'object')
+    ? parsed.review
+    : parsed;
+  if (review && Array.isArray((review as any).bulletSuggestions)) {
+    (review as any).bulletSuggestions = sanitizeBulletSuggestions((review as any).bulletSuggestions);
+  }
+  return review;
+}
+
+// Tailor a one-page resume from the Master Profile + JD (buildTailorPrompt),
+// coerced + sanitized to the Builder's exact shape. The raw generation core
+// shared by /tailor/claude (via tailorWithCache) and /jobs/:id/generate.
+async function runProfileTailor(lib: any, jdText: string, apiKey: string): Promise<{ resumeContent: any; review: any }> {
+  const masterProfileJson = JSON.stringify(lib, null, 2);
+  const { system, user } = buildTailorPrompt(masterProfileJson, jdText);
+  const parsed = await callClaudeJSON(apiKey, system, user, 6000);
+  if (!Array.isArray(parsed.resumeContent?.sections) || parsed.resumeContent.sections.length === 0) {
+    throw new Error('Claude response missing resumeContent.sections');
+  }
+  const resumeContent = sanitizeResumeContent(normalizeResumeContent(parsed.resumeContent));
+  const review = normalizeReview(parsed.review);
+  if (review && Array.isArray((review as any).bulletSuggestions)) {
+    (review as any).bulletSuggestions = sanitizeBulletSuggestions((review as any).bulletSuggestions);
+  }
+  return { resumeContent, review };
+}
+
+// Tailor + cache: same JD + unchanged profile returns the stored tailor_results
+// row with no Claude call. Shared by /tailor/claude and /jobs/:id/generate so the
+// generate flow reuses the exact tailor cache (not a separate path).
+async function tailorWithCache(opts: {
+  userId: string; lib: any; jobDescription: string; applicationId?: string | null; apiKey: string;
+}): Promise<{ resumeContent: any; review: any; fromCache: boolean }> {
+  const { userId, lib, jobDescription, applicationId, apiKey } = opts;
+  const jdHash = hashJD(jobDescription);
+  const profileHash = hashProfile(lib);
+
+  try {
+    const { data: cached } = await supabase
+      .from('tailor_results')
+      .select('resume_content, review')
+      .eq('user_id', userId)
+      .eq('jd_hash', jdHash)
+      .eq('profile_hash', profileHash)
+      .maybeSingle();
+    if (cached?.resume_content) {
+      console.log(`[tailorWithCache] cache hit userId=${userId} jdHash=${jdHash}`);
+      return {
+        resumeContent: normalizeResumeContent(cached.resume_content),
+        review: normalizeReview(cached.review),
+        fromCache: true,
+      };
+    }
+  } catch (err: any) {
+    console.warn('[tailorWithCache] cache lookup failed (continuing without cache):', err.message);
+  }
+
+  const { resumeContent, review } = await runProfileTailor(lib, jobDescription, apiKey);
+
+  const { error: saveErr } = await supabase
+    .from('tailor_results')
+    .upsert({
+      user_id: userId,
+      application_id: applicationId ?? null,
+      jd_hash: jdHash,
+      profile_hash: profileHash,
+      resume_content: resumeContent,
+      review,
+      score: typeof review?.matchScore === 'number' ? review.matchScore : null,
+      created_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,jd_hash,profile_hash' });
+  if (saveErr) console.warn('[tailorWithCache] failed to cache result:', saveErr.message);
+
+  return { resumeContent, review, fromCache: false };
+}
+
+// Persist an assembled/tailored resumeContent as a NEW resume_builder version
+// (never overwrites) and prime resume_scores so the Builder's first re-rank is a
+// cache hit. Extracted from /assemble/claude so /jobs/:id/generate writes the
+// version the exact same way. Returns the created version row.
+async function createBuilderVersion(authClient: any, userId: string, opts: {
+  resumeContent: any; jobDescription: string; company?: string; role?: string;
+  score: number | null; changeLog?: string[]; settings?: any;
+}): Promise<any> {
+  const { resumeContent, jobDescription, company, role, score, changeLog = [], settings = {} } = opts;
+  const jdHash = hashJD(jobDescription);
+
+  const label = (typeof company === 'string' && company.trim())
+    || (typeof role === 'string' && role.trim())
+    || 'Resume';
+  const versionName = `Tailored — ${label} ${new Date().toISOString()}`;
+
+  const { data: version, error: insertErr } = await authClient
+    .from('resume_builder')
+    .insert({
+      user_id: userId,
+      version_name: versionName,
+      content: resumeContent,
+      settings: settings ?? {},
+      job_description: jobDescription,
+      jd_hash: jdHash,
+      updated_at: new Date().toISOString(),
+    })
+    .select()
+    .single();
+
+  if (insertErr) throw new Error(insertErr.message);
+
+  // Prime the score store so the freshly written resume is already scored —
+  // the Builder's first (auto) re-rank on this content is a cache hit, no spend.
+  try {
+    const contentHash = hashContent(resumeContent);
+    await authClient.from('resume_scores').upsert({
+      user_id: userId,
+      jd_hash: jdHash,
+      content_hash: contentHash,
+      score,
+      review: { matchScore: score, source: 'assemble', changeLog },
+    }, { onConflict: 'user_id,jd_hash,content_hash' });
+  } catch (err: any) {
+    console.warn('[createBuilderVersion] failed to prime score (continuing):', err.message);
+  }
+
+  return version;
+}
+
+// Generate (or return cached) a job-specific cover letter and persist it to
+// cover_letters, content-addressed on (user_id, jd_hash, profile_hash). Extracted
+// from /cover-letter/claude so /jobs/:id/generate reuses the same logic. An
+// UNEDITED stored letter for the same JD + profile is returned with no Claude call.
+async function generateAndStoreCoverLetter(opts: {
+  userId: string; lib: any; jobDescription: string; applicationId?: string | null;
+  company?: string; role?: string; apiKey: string;
+}): Promise<{ id: string | null; coverLetter: string; footer: string | null; fromCache: boolean }> {
+  const { userId, lib, jobDescription, applicationId, company, role, apiKey } = opts;
+  const jdHash = hashJD(jobDescription);
+  const profileHash = hashProfile(lib);
+
+  try {
+    const { data: cached } = await supabase
+      .from('cover_letters')
+      .select('id, cover_letter, footer, edited')
+      .eq('user_id', userId)
+      .eq('jd_hash', jdHash)
+      .eq('profile_hash', profileHash)
+      .maybeSingle();
+    if (cached?.cover_letter && !cached.edited) {
+      console.log(`[generateAndStoreCoverLetter] cache hit userId=${userId} jdHash=${jdHash}`);
+      return { id: cached.id, coverLetter: cached.cover_letter, footer: cached.footer ?? null, fromCache: true };
+    }
+  } catch (err: any) {
+    console.warn('[generateAndStoreCoverLetter] cache lookup failed (continuing without cache):', err.message);
+  }
+
+  const masterProfileJson = JSON.stringify(lib, null, 2);
+  const { system, user } = buildCoverLetterPrompt(
+    masterProfileJson, jobDescription,
+    typeof company === 'string' ? company : undefined,
+    typeof role === 'string' ? role : undefined,
+  );
+  const parsed = await callClaudeJSON(apiKey, system, user, 1500);
+  if (typeof parsed.coverLetter !== 'string' || !parsed.coverLetter.trim()) {
+    throw new Error('Claude response missing coverLetter');
+  }
+
+  const coverLetter = sanitizeResumeText(parsed.coverLetter.trim());
+
+  const { data: saved, error: saveErr } = await supabase
+    .from('cover_letters')
+    .upsert({
+      user_id: userId,
+      application_id: applicationId ?? null,
+      jd_hash: jdHash,
+      profile_hash: profileHash,
+      cover_letter: coverLetter,
+      company: typeof company === 'string' ? company : null,
+      role: typeof role === 'string' ? role : null,
+      edited: false,
+      updated_at: new Date().toISOString(),
+    }, { onConflict: 'user_id,jd_hash,profile_hash' })
+    .select('id, footer')
+    .single();
+  if (saveErr) console.warn('[generateAndStoreCoverLetter] failed to persist:', saveErr.message);
+
+  return { id: saved?.id ?? null, coverLetter, footer: saved?.footer ?? null, fromCache: false };
+}
+
 app.use(cors());
 app.use(express.json({ limit: '20mb' }));
 
@@ -651,129 +893,17 @@ app.post('/tailor/claude', requireAuth, async (req, res) => {
     return res.status(400).json({ success: false, error: 'Master profile is empty. Go to the Master Information tab and build your profile first.' });
   }
 
-  const jdHash = hashJD(jobDescription);
-  const profileHash = hashProfile(lib);
-
-  // Cache check — same JD + same profile → return the stored result
-  try {
-    const { data: cached } = await supabase
-      .from('tailor_results')
-      .select('resume_content, review')
-      .eq('user_id', userId)
-      .eq('jd_hash', jdHash)
-      .eq('profile_hash', profileHash)
-      .maybeSingle();
-
-    if (cached?.resume_content) {
-      console.log(`[/tailor/claude] cache hit userId=${userId} jdHash=${jdHash}`);
-      return res.json({
-        success: true,
-        // Normalize on read too — rows cached before normalization existed
-        resumeContent: normalizeResumeContent(cached.resume_content),
-        review: normalizeReview(cached.review),
-        fromCache: true,
-      });
-    }
-  } catch (err: any) {
-    console.warn('[/tailor/claude] cache lookup failed (continuing without cache):', err.message);
-  }
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
   }
 
-  const masterProfileJson = JSON.stringify(lib, null, 2);
-
-  const { system: systemPrompt, user: userMessage } = buildTailorPrompt(masterProfileJson, jobDescription);
-
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 6000,
-        temperature: 0,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
-      }),
+    const { resumeContent, review, fromCache } = await tailorWithCache({
+      userId, lib, jobDescription, applicationId, apiKey,
     });
-
-    const responseData = await response.json() as any;
-    if (!response.ok) {
-      const errMsg = responseData?.error?.message || 'Claude API error';
-      console.error('[/tailor/claude] Anthropic error:', errMsg);
-      return res.status(500).json({ success: false, error: errMsg });
-    }
-
-    const rawText: string = responseData?.content?.[0]?.text ?? '';
-
-    // Defensive JSON parse — strip code fences if present
-    let parsed: any;
-    try {
-      const cleaned = rawText
-        .replace(/^```(?:json)?\s*/m, '')
-        .replace(/\s*```\s*$/m, '')
-        .trim();
-      parsed = JSON.parse(cleaned);
-    } catch {
-      const match = rawText.match(/\{[\s\S]*\}/);
-      if (!match) {
-        console.error('[/tailor/claude] invalid JSON from Claude:', rawText.slice(0, 300));
-        return res.status(500).json({ success: false, error: 'Claude returned malformed JSON', raw: rawText.slice(0, 300) });
-      }
-      try {
-        parsed = JSON.parse(match[0]);
-      } catch {
-        return res.status(500).json({ success: false, error: 'Could not parse Claude response as JSON', raw: rawText.slice(0, 300) });
-      }
-    }
-
-    if (!Array.isArray(parsed.resumeContent?.sections) || parsed.resumeContent.sections.length === 0) {
-      console.error('[/tailor/claude] missing resumeContent.sections in:', JSON.stringify(parsed).slice(0, 300));
-      return res.status(500).json({ success: false, error: 'Claude response missing resumeContent.sections', raw: rawText.slice(0, 300) });
-    }
-
-    // Coerce to the exact ResumeContent shape the Builder depends on BEFORE
-    // caching — a creative Claude response must never poison tailor_results
-    // or crash the Builder render.
-    // Sanitize resume-bound text only (bullets, summary, titles + paste-ready
-    // bulletSuggestions). Analytical prose in the review is left untouched.
-    const resumeContent = sanitizeResumeContent(normalizeResumeContent(parsed.resumeContent));
-    const review = normalizeReview(parsed.review);
-    if (review && Array.isArray((review as any).bulletSuggestions)) {
-      (review as any).bulletSuggestions = sanitizeBulletSuggestions((review as any).bulletSuggestions);
-    }
-
-    // Persist to cache — score lives here so it is never recomputed for an unchanged JD+profile
-    const { error: saveErr } = await supabase
-      .from('tailor_results')
-      .upsert({
-        user_id: userId,
-        application_id: applicationId ?? null,
-        jd_hash: jdHash,
-        profile_hash: profileHash,
-        resume_content: resumeContent,
-        review,
-        score: typeof review?.matchScore === 'number' ? review.matchScore : null,
-        created_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,jd_hash,profile_hash' });
-
-    if (saveErr) console.warn('[/tailor/claude] failed to cache result:', saveErr.message);
-
-    console.log(`[/tailor/claude] userId=${userId} sections=${resumeContent.sections.length} fit=${(review as any)?.fitAssessment?.level ?? 'none'} score=${review?.matchScore ?? 'n/a'}`);
-
-    return res.json({
-      success: true,
-      resumeContent,
-      review,
-      fromCache: false,
-    });
+    console.log(`[/tailor/claude] userId=${userId} fromCache=${fromCache} sections=${resumeContent.sections.length} fit=${(review as any)?.fitAssessment?.level ?? 'none'} score=${review?.matchScore ?? 'n/a'}`);
+    return res.json({ success: true, resumeContent, review, fromCache });
   } catch (err: any) {
     console.error('[/tailor/claude] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -1023,47 +1153,18 @@ app.post('/assemble/claude', requireAuth, async (req, res) => {
       ? parsed.changeLog.filter((c: any) => typeof c === 'string').slice(0, 30)
       : [];
 
-    // The JD travels with the version so the Builder knows what to score against.
-    const jdHash = hashJD(jobDescription);
-
-    // Write a NEW version — never overwrite the previous one
-    const label = (typeof company === 'string' && company.trim())
-      || (typeof role === 'string' && role.trim())
-      || 'Resume';
-    const versionName = `Tailored — ${label} ${new Date().toISOString()}`;
-
-    const { data: version, error: insertErr } = await authClient
-      .from('resume_builder')
-      .insert({
-        user_id: userId,
-        version_name: versionName,
-        content: resumeContent,
-        settings: latestVersion?.settings ?? {},
-        job_description: jobDescription,
-        jd_hash: jdHash,
-        updated_at: new Date().toISOString(),
-      })
-      .select()
-      .single();
-
-    if (insertErr) {
-      console.error('[/assemble/claude] failed to create version:', insertErr.message);
-      return res.status(500).json({ success: false, error: insertErr.message });
-    }
-
-    // Prime the score store so the freshly assembled resume is already scored —
-    // the Builder's first (auto) re-rank on this content is a cache hit, no spend.
+    // Write a NEW version — never overwrite the previous one. The JD travels with
+    // it (so the Builder knows what to score against) and the score store is primed
+    // so the Builder's first re-rank is a cache hit. Shared with /jobs/:id/generate.
+    let version;
     try {
-      const contentHash = hashContent(resumeContent);
-      await authClient.from('resume_scores').upsert({
-        user_id: userId,
-        jd_hash: jdHash,
-        content_hash: contentHash,
-        score,
-        review: { matchScore: score, source: 'assemble', changeLog },
-      }, { onConflict: 'user_id,jd_hash,content_hash' });
+      version = await createBuilderVersion(authClient, userId, {
+        resumeContent, jobDescription, company, role, score, changeLog,
+        settings: latestVersion?.settings ?? {},
+      });
     } catch (err: any) {
-      console.warn('[/assemble/claude] failed to prime score (continuing):', err.message);
+      console.error('[/assemble/claude] failed to create version:', err.message);
+      return res.status(500).json({ success: false, error: err.message });
     }
 
     console.log(`[/assemble/claude] userId=${userId} approvedBullets=${approvedBullets.length} score=${score ?? 'n/a'} versionId=${version?.id}`);
@@ -1108,113 +1209,20 @@ app.post('/cover-letter/claude', requireAuth, async (req, res) => {
     return res.status(400).json({ success: false, error: 'Master profile is empty. Go to the Master Information tab and build your profile first.' });
   }
 
-  const jdHash = hashJD(jobDescription);
-  const profileHash = hashProfile(lib);
-
-  // Cache check — same JD + same profile + not manually edited => return stored letter
-  try {
-    const { data: cached } = await supabase
-      .from('cover_letters')
-      .select('id, cover_letter, footer, edited')
-      .eq('user_id', userId)
-      .eq('jd_hash', jdHash)
-      .eq('profile_hash', profileHash)
-      .maybeSingle();
-
-    if (cached?.cover_letter && !cached.edited) {
-      console.log(`[/cover-letter/claude] cache hit userId=${userId} jdHash=${jdHash}`);
-      return res.json({ success: true, id: cached.id, coverLetter: cached.cover_letter, footer: cached.footer ?? null, fromCache: true });
-    }
-  } catch (err: any) {
-    console.warn('[/cover-letter/claude] cache lookup failed (continuing without cache):', err.message);
-  }
-
   const apiKey = process.env.ANTHROPIC_API_KEY;
   if (!apiKey) {
     return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
   }
 
-  const masterProfileJson = JSON.stringify(lib, null, 2);
-  const { system: systemPrompt, user: userMessage } = buildCoverLetterPrompt(
-    masterProfileJson, jobDescription,
-    typeof company === 'string' ? company : undefined,
-    typeof role === 'string' ? role : undefined,
-  );
-
   try {
-    const response = await fetch('https://api.anthropic.com/v1/messages', {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': apiKey,
-        'anthropic-version': '2023-06-01',
-      },
-      body: JSON.stringify({
-        model: 'claude-sonnet-4-6',
-        max_tokens: 1500,
-        temperature: 0,
-        system: systemPrompt,
-        messages: [{ role: 'user', content: userMessage }],
-      }),
+    const { id, coverLetter, footer, fromCache } = await generateAndStoreCoverLetter({
+      userId, lib, jobDescription, applicationId,
+      company: typeof company === 'string' ? company : undefined,
+      role: typeof role === 'string' ? role : undefined,
+      apiKey,
     });
-
-    const responseData = await response.json() as any;
-    if (!response.ok) {
-      const errMsg = responseData?.error?.message || 'Claude API error';
-      console.error('[/cover-letter/claude] Anthropic error:', errMsg);
-      return res.status(500).json({ success: false, error: errMsg });
-    }
-
-    const rawText: string = responseData?.content?.[0]?.text ?? '';
-
-    // Defensive JSON parse — strip code fences if present
-    let parsed: any;
-    try {
-      const cleaned = rawText
-        .replace(/^```(?:json)?\s*/m, '')
-        .replace(/\s*```\s*$/m, '')
-        .trim();
-      parsed = JSON.parse(cleaned);
-    } catch {
-      const match = rawText.match(/\{[\s\S]*\}/);
-      if (!match) {
-        console.error('[/cover-letter/claude] invalid JSON from Claude:', rawText.slice(0, 300));
-        return res.status(500).json({ success: false, error: 'Claude returned malformed JSON', raw: rawText.slice(0, 300) });
-      }
-      try { parsed = JSON.parse(match[0]); }
-      catch { return res.status(500).json({ success: false, error: 'Could not parse Claude response as JSON', raw: rawText.slice(0, 300) }); }
-    }
-
-    if (typeof parsed.coverLetter !== 'string' || !parsed.coverLetter.trim()) {
-      console.error('[/cover-letter/claude] missing coverLetter in:', JSON.stringify(parsed).slice(0, 300));
-      return res.status(500).json({ success: false, error: 'Claude response missing coverLetter', raw: rawText.slice(0, 300) });
-    }
-
-    // Same hygiene the resume-bound text gets: strip em dashes / arrows.
-    const coverLetter = sanitizeResumeText(parsed.coverLetter.trim());
-
-    // Persist — service-role upsert keyed on (user_id, jd_hash, profile_hash),
-    // exactly like tailor_results. A fresh generation is never "edited".
-    const { data: saved, error: saveErr } = await supabase
-      .from('cover_letters')
-      .upsert({
-        user_id: userId,
-        application_id: applicationId ?? null,
-        jd_hash: jdHash,
-        profile_hash: profileHash,
-        cover_letter: coverLetter,
-        company: typeof company === 'string' ? company : null,
-        role: typeof role === 'string' ? role : null,
-        edited: false,
-        updated_at: new Date().toISOString(),
-      }, { onConflict: 'user_id,jd_hash,profile_hash' })
-      .select('id, footer')
-      .single();
-
-    if (saveErr) console.warn('[/cover-letter/claude] failed to persist:', saveErr.message);
-
-    console.log(`[/cover-letter/claude] userId=${userId} len=${coverLetter.length} id=${saved?.id ?? 'n/a'}`);
-    return res.json({ success: true, id: saved?.id ?? null, coverLetter, footer: saved?.footer ?? null, fromCache: false });
+    console.log(`[/cover-letter/claude] userId=${userId} fromCache=${fromCache} len=${coverLetter.length} id=${id ?? 'n/a'}`);
+    return res.json({ success: true, id, coverLetter, footer, fromCache });
   } catch (err: any) {
     console.error('[/cover-letter/claude] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -1398,6 +1406,299 @@ app.post('/export/pdf', requireAuth, async (req, res) => {
     console.error('[/export/pdf] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
+});
+
+// ════════════════════════════════════════════════════════════════════════════
+// Job-triage board (Stage 4) — paste a JD, get a cheap automatic fit score,
+// generate a tailored resume (+ optional cover letter) per job on click.
+// scraped_jobs is content-addressed on (user_id, jd_hash) via hashJD.
+// ════════════════════════════════════════════════════════════════════════════
+
+// Coerce a score field to a rounded int or null (the scorer always returns ints,
+// but normalizeReview may leave a field absent).
+const numOrNull = (n: any) => (typeof n === 'number' && Number.isFinite(n) ? Math.round(n) : null);
+// The scorer emits laneWarning as "null", "", or a sentence — store only real warnings.
+const laneWarningOrNull = (s: any) => {
+  if (typeof s !== 'string') return null;
+  const t = s.trim();
+  return t && t.toLowerCase() !== 'null' ? t : null;
+};
+
+// Write the scorer's review onto a scraped_jobs row (status -> 'scored').
+function scoredJobFields(review: any) {
+  return {
+    match_score: numOrNull(review?.matchScore),
+    ats_score: numOrNull(review?.atsScore),
+    recruiter_score: numOrNull(review?.recruiterScore),
+    bucket_verdict: review?.bucketFit?.verdict ?? null,
+    lane_warning: laneWarningOrNull(review?.laneWarning),
+    status: 'scored',
+    scored_at: new Date().toISOString(),
+  };
+}
+
+// ── POST /internal/score-job ──────────────────────────────────────────────────
+// Machine-auth path for Phase 2 (n8n / Apify). Authed by a shared secret in the
+// 'x-internal-key' header; the OWNER is derived from INTERNAL_USER_ID server-side
+// and is NEVER read from the body. Body: { jobId } OR { jd_text, title, company,
+// location, url, source }. Uses the service-role client but never trusts a
+// client-supplied owner. curl-testable so Phase 2 can point at a proven endpoint.
+app.post('/internal/score-job', async (req, res) => {
+  const expectedKey = process.env.INTERNAL_API_KEY;
+  if (!expectedKey) {
+    return res.status(500).json({ success: false, error: 'INTERNAL_API_KEY is not configured on the server.' });
+  }
+  if (req.header('x-internal-key') !== expectedKey) {
+    return res.status(401).json({ success: false, error: 'Invalid internal key' });
+  }
+  const ownerId = process.env.INTERNAL_USER_ID;
+  if (!ownerId) {
+    return res.status(500).json({ success: false, error: 'INTERNAL_USER_ID is not configured on the server.' });
+  }
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  const { jobId, jd_text, title, company, location, url, source } = req.body ?? {};
+
+  try {
+    // Resolve the job row: an existing jobId (owned by the configured owner) OR an
+    // inline JD we upsert first. user_id is ALWAYS the server-side owner.
+    let job: any = null;
+    if (typeof jobId === 'string' && jobId) {
+      const { data, error } = await supabase
+        .from('scraped_jobs').select('*').eq('id', jobId).eq('user_id', ownerId).maybeSingle();
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      if (!data) return res.status(404).json({ success: false, error: 'Job not found for the configured owner.' });
+      job = data;
+    } else {
+      if (!jd_text || typeof jd_text !== 'string' || !jd_text.trim()) {
+        return res.status(400).json({ success: false, error: 'jobId or jd_text is required' });
+      }
+      const { data, error } = await supabase
+        .from('scraped_jobs')
+        .upsert({
+          user_id: ownerId,
+          source: typeof source === 'string' ? source : 'manual',
+          title: typeof title === 'string' ? title : null,
+          company: typeof company === 'string' ? company : null,
+          location: typeof location === 'string' ? location : null,
+          url: typeof url === 'string' ? url : null,
+          jd_text,
+          jd_hash: hashJD(jd_text),
+        }, { onConflict: 'user_id,jd_hash' })
+        .select().single();
+      if (error) return res.status(500).json({ success: false, error: error.message });
+      job = data;
+    }
+
+    // Score the OWNER's master profile (service-role) against the JD.
+    const { data: profileRow } = await supabase
+      .from('master_profile').select('content').eq('user_id', ownerId).maybeSingle();
+    const lib = profileRow?.content;
+    if (!lib?.experiences?.length && !lib?.projects?.length) {
+      return res.status(400).json({ success: false, error: 'Owner master profile is empty; cannot score.' });
+    }
+
+    const review = await runProfileScorer(lib, job.jd_text, apiKey);
+
+    const { data: updated, error: updErr } = await supabase
+      .from('scraped_jobs')
+      .update(scoredJobFields(review))
+      .eq('id', job.id).eq('user_id', ownerId).select().single();
+    if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+
+    console.log(`[/internal/score-job] ownerId=${ownerId} jobId=${updated.id} match=${updated.match_score} verdict=${updated.bucket_verdict}`);
+    return res.json({ success: true, job: updated });
+  } catch (err: any) {
+    console.error('[/internal/score-job] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /jobs ────────────────────────────────────────────────────────────────
+// Manual paste. Content-addressed on (user_id, jd_hash): re-pasting the same JD
+// returns the existing row (status/scores preserved) instead of erroring. A brand
+// new row takes the DB default status 'new'.
+app.post('/jobs', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { jd_text, title, company, url } = req.body ?? {};
+  if (!jd_text || typeof jd_text !== 'string' || !jd_text.trim()) {
+    return res.status(400).json({ success: false, error: 'jd_text is required' });
+  }
+
+  const { data, error } = await authClient
+    .from('scraped_jobs')
+    .upsert({
+      user_id: userId,
+      source: 'manual',
+      title: typeof title === 'string' ? title : null,
+      company: typeof company === 'string' ? company : null,
+      url: typeof url === 'string' ? url : null,
+      jd_text,
+      jd_hash: hashJD(jd_text),
+    }, { onConflict: 'user_id,jd_hash' })
+    .select().single();
+
+  if (error) return res.status(400).json({ success: false, error: error.message });
+  return res.json({ success: true, job: data });
+});
+
+// ── GET /jobs?status=&sort= ───────────────────────────────────────────────────
+// The user's jobs, ranked best-fit-first by default (match_score desc, then most
+// recently scored). ?sort=recent orders by creation. ?status= filters the lane.
+app.get('/jobs', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const status = typeof req.query.status === 'string' ? req.query.status : '';
+  const sort = typeof req.query.sort === 'string' ? req.query.sort : '';
+
+  let query = authClient.from('scraped_jobs').select('*').eq('user_id', userId);
+  if (status) query = query.eq('status', status);
+
+  if (sort === 'recent') {
+    query = query.order('created_at', { ascending: false });
+  } else {
+    query = query
+      .order('match_score', { ascending: false, nullsFirst: false })
+      .order('scored_at', { ascending: false, nullsFirst: false });
+  }
+
+  const { data, error } = await query;
+  if (error) return res.status(400).json({ success: false, error: error.message });
+  return res.json({ success: true, jobs: data ?? [] });
+});
+
+// ── POST /jobs/:id/score ──────────────────────────────────────────────────────
+// Score one of the user's jobs against their master profile (same scorer path as
+// /internal/score-job and /rerank/claude), writing the triage scores + 'scored'.
+app.post('/jobs/:id/score', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { id } = req.params;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  const { data: job, error: jobErr } = await authClient
+    .from('scraped_jobs').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+  if (jobErr) return res.status(500).json({ success: false, error: jobErr.message });
+  if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+
+  const { data: profileRow, error: profileErr } = await authClient
+    .from('master_profile').select('content').eq('user_id', userId).maybeSingle();
+  if (profileErr) return res.status(500).json({ success: false, error: profileErr.message });
+  const lib = profileRow?.content;
+  if (!lib?.experiences?.length && !lib?.projects?.length) {
+    return res.status(400).json({ success: false, error: 'Master profile is empty. Build your profile first.' });
+  }
+
+  try {
+    const review = await runProfileScorer(lib, job.jd_text, apiKey);
+    const { data: updated, error: updErr } = await authClient
+      .from('scraped_jobs')
+      .update(scoredJobFields(review))
+      .eq('id', id).eq('user_id', userId).select().single();
+    if (updErr) return res.status(500).json({ success: false, error: updErr.message });
+    console.log(`[/jobs/:id/score] userId=${userId} jobId=${id} match=${updated.match_score} verdict=${updated.bucket_verdict}`);
+    return res.json({ success: true, job: updated, review });
+  } catch (err: any) {
+    console.error('[/jobs/:id/score] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /jobs/:id/generate ───────────────────────────────────────────────────
+// Body: { includeCoverLetter?: boolean }. Reuses the exact tailor cache
+// (tailorWithCache -> tailor_results) and the assemble persistence path
+// (createBuilderVersion -> resume_builder) so the result opens directly in the
+// Builder. The cover letter (generateAndStoreCoverLetter -> cover_letters) runs
+// ONLY when includeCoverLetter is true. Returns the version id for deep-linking.
+app.post('/jobs/:id/generate', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { id } = req.params;
+  const includeCoverLetter = req.body?.includeCoverLetter === true;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  const { data: job, error: jobErr } = await authClient
+    .from('scraped_jobs').select('*').eq('id', id).eq('user_id', userId).maybeSingle();
+  if (jobErr) return res.status(500).json({ success: false, error: jobErr.message });
+  if (!job) return res.status(404).json({ success: false, error: 'Job not found' });
+
+  const { data: profileRow, error: profileErr } = await authClient
+    .from('master_profile').select('content').eq('user_id', userId).maybeSingle();
+  if (profileErr) return res.status(500).json({ success: false, error: profileErr.message });
+  const lib = profileRow?.content;
+  if (!lib?.experiences?.length && !lib?.projects?.length) {
+    return res.status(400).json({ success: false, error: 'Master profile is empty. Build your profile first.' });
+  }
+
+  try {
+    // 1) Tailor (cached in tailor_results, exactly like /tailor/claude).
+    const { resumeContent, review, fromCache } = await tailorWithCache({
+      userId, lib, jobDescription: job.jd_text, applicationId: null, apiKey,
+    });
+    const score = typeof review?.matchScore === 'number' ? Math.round(review.matchScore) : null;
+
+    // 2) Persist a Builder version the same way /assemble/claude does (inherits the
+    //    latest version's formatting settings), so it opens in the Resume Builder.
+    const { data: latestVersion } = await authClient
+      .from('resume_builder').select('settings')
+      .eq('user_id', userId).order('updated_at', { ascending: false }).limit(1).maybeSingle();
+
+    const version = await createBuilderVersion(authClient, userId, {
+      resumeContent,
+      jobDescription: job.jd_text,
+      company: job.company ?? undefined,
+      role: job.title ?? undefined,
+      score,
+      settings: latestVersion?.settings ?? {},
+    });
+
+    // 3) Optional cover letter — reuse the cover-letter path, keyed to the same JD.
+    let coverLetter: { id: string | null; coverLetter: string; fromCache: boolean } | null = null;
+    if (includeCoverLetter) {
+      const cl = await generateAndStoreCoverLetter({
+        userId, lib, jobDescription: job.jd_text, applicationId: null,
+        company: job.company ?? undefined, role: job.title ?? undefined, apiKey,
+      });
+      coverLetter = { id: cl.id, coverLetter: cl.coverLetter, fromCache: cl.fromCache };
+    }
+
+    const { data: updated } = await authClient
+      .from('scraped_jobs').update({ status: 'generated' }).eq('id', id).eq('user_id', userId).select().single();
+
+    console.log(`[/jobs/:id/generate] userId=${userId} jobId=${id} versionId=${version?.id} cover=${includeCoverLetter} tailorCache=${fromCache}`);
+    return res.json({ success: true, job: updated, versionId: version?.id ?? null, score, review, coverLetter });
+  } catch (err: any) {
+    console.error('[/jobs/:id/generate] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── PATCH /jobs/:id ───────────────────────────────────────────────────────────
+// Move a job through its lifecycle (e.g. applied / skipped). Ownership-scoped.
+app.patch('/jobs/:id', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const authClient = getAuthClient(req.headers.authorization as string);
+  const { id } = req.params;
+  const { status } = req.body ?? {};
+  const ALLOWED = ['new', 'scored', 'generated', 'applied', 'skipped'];
+  if (typeof status !== 'string' || !ALLOWED.includes(status)) {
+    return res.status(400).json({ success: false, error: `status must be one of: ${ALLOWED.join(', ')}` });
+  }
+
+  const { data, error } = await authClient
+    .from('scraped_jobs').update({ status }).eq('id', id).eq('user_id', userId).select().single();
+  if (error) return res.status(400).json({ success: false, error: error.message });
+  return res.json({ success: true, job: data });
 });
 
 app.listen(PORT, () => {

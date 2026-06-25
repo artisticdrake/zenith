@@ -11,6 +11,7 @@ import MasterInfoTab from "@/components/tabs/MasterInfoTab";
 import AnalyticsTab from "@/components/tabs/AnalyticsTab";
 import ProfileTab from "@/components/tabs/ProfileTab";
 import TailorTab from "@/components/tabs/TailorTab";
+import JobsTab from "@/components/tabs/JobsTab";
 import ResumeBuilder from "@/pages/ResumeBuilder";
 import AppFormModal from "@/components/modals/AppFormModal";
 import AppDetailModal from "@/components/modals/AppDetailModal";
@@ -567,8 +568,26 @@ export default function JobApplicationTracker({ session }: { session: any }) {
           </div>
         </div>
 
+        {/* Jobs — always mounted so the paste box + ranked list survive tab switches */}
+        <div className={activeTab === "jobs" ? "flex-1 overflow-y-auto" : "hidden"}>
+          <div className="relative z-10 max-w-7xl mx-auto px-7 py-8">
+            <div className="mb-8">
+              <h1 className="text-[28px] font-black tracking-tight leading-tight">
+                Job <span className="gradient-text">Triage</span>
+              </h1>
+              <p className="text-[13px] text-muted-foreground/60 mt-1.5">
+                Paste jobs, rank them by fit, and generate a tailored resume per job on click
+              </p>
+            </div>
+            <JobsTab
+              session={session}
+              onOpenBuilder={() => setActiveTab("resume-builder")}
+            />
+          </div>
+        </div>
+
         {/* All other tabs */}
-        {activeTab !== "resume-builder" && activeTab !== "master-info" && activeTab !== "tailor" && (
+        {activeTab !== "resume-builder" && activeTab !== "master-info" && activeTab !== "tailor" && activeTab !== "jobs" && (
         <div className="flex-1 overflow-y-auto">
         {/* Ambient background orbs — dark mode only */}
         <div className="pointer-events-none fixed inset-0 overflow-hidden hidden dark:block" style={{ zIndex: 0 }}>

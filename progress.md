@@ -4,6 +4,8 @@
 
 _Last rewritten: 2026-06-17. This document reflects the **current** state of the code after the "Remove vault + deterministic matcher; cache Claude tailor scores" work. The old deterministic scoring engine (`matcher.ts`, `computeHybridScore`, `/match`, `/score/master`) and the 5-resume vault are **gone** — if you see them referenced anywhere else, that doc is stale._
 
+> **⚠️ Sections 1–9 below predate later work** (the Zenith assembly pipeline `/assemble/claude`, the cover-letter pipeline, prompt extraction into `api/src/lib/prompts.ts`, and the content-addressed `/rerank/claude` score store). They are kept for historical context. For the most recent additive feature, see **§10 — Phase 1: Job-triage board (Stage 4), 2026-06-22**, which is current.
+
 ---
 
 ## 1. What the product is
@@ -218,3 +220,56 @@ Manifest v3. Content script runs on LinkedIn job pages; background worker POSTs 
 3. Bullet UX fixes: correct-target insertion, inline accept/reject, per-suggestion undo.
 
 _(Scoring trigger / badge-source / bullet-UX decisions deferred per the last discussion — to be settled before implementation.)_
+
+---
+
+## 10. Phase 1 — Job-triage board (Stage 4, 2026-06-22)
+
+A **purely additive** triage pipeline: paste a JD → cheap automatic fit score → on-demand tailored resume (+ optional cover letter) per job. Fed by **manual paste for now** (no scraping/n8n yet). Built to NOT modify or break existing routes, prompts, or `scripts/validate-prompts.mjs`.
+
+### 10.1 What was built
+
+- **Migration `api/migrations/stage4_scraped_jobs.sql`** — `scraped_jobs` table, content-addressed on `unique(user_id, jd_hash)`, indexes on `(user_id, status)` and `(user_id, match_score)`, RLS with 4 own-row policies (`auth.uid() = user_id`) mirroring `cover_letters`. Columns: `source`, `title`, `company`, `location`, `url`, `jd_text`, `jd_hash`, `posted_at`, `status` (`new|scored|generated|applied|skipped`), `match_score`, `ats_score`, `recruiter_score`, `bucket_verdict`, `lane_warning`, `scored_at`. **Applied to project `mkbhzvjllgnponlzwfok` (job-tracker-mvp) and verified.**
+
+- **Internal scoring endpoint (machine-auth, Phase-2 path):** `POST /internal/score-job` — authed by an `x-internal-key` header matching `INTERNAL_API_KEY`; owner derived **server-side from `INTERNAL_USER_ID`, never from the body**; service-role client; upserts on `(user_id, jd_hash)`, scores, returns the row. curl-testable for future Apify/n8n.
+
+- **User-facing routes (`requireAuth`, RLS-enforced):** `POST /jobs` (manual paste, `source='manual'`), `POST /jobs/:id/score`, `GET /jobs?status=&sort=` (default rank `match_score desc, scored_at desc`), `POST /jobs/:id/generate { includeCoverLetter? }`, `PATCH /jobs/:id` (status).
+
+- **Frontend:** new **Jobs** tab (`web/src/components/tabs/JobsTab.tsx`) + sidebar entry + shell wiring in `JobApplicationTracker.tsx`. Paste box → add+auto-score; ranked list with match score, color-coded bucket verdict, lane warning; per-row Generate resume / + Cover letter (deep-links into Builder) / Mark applied / Skip.
+
+### 10.2 Reuse, not duplication (shared cores in `index.ts`)
+
+To avoid duplicating prompt/persistence logic, extracted shared helpers used by both the new routes and the existing ones (existing routes refactored to delegate, behavior-preserving):
+
+- `callClaudeJSON` — the single Anthropic call + defensive JSON parse.
+- `runProfileScorer` — renders the Master Profile via `masterProfileToText` and calls `buildScorerPrompt` the same way `/rerank/claude` does. **Returns the RAW scorer review** (bullets sanitized) — `normalizeReview` is NOT used here because it whitelists only tailor-UI fields and drops `atsScore`/`recruiterScore`/`bucketFit`/`laneWarning` that the board needs.
+- `tailorWithCache` — tailor + `tailor_results` cache (now backs `/tailor/claude` and generate).
+- `createBuilderVersion` — writes the `resume_builder` version + primes `resume_scores` (extracted from `/assemble/claude`, shared with generate).
+- `generateAndStoreCoverLetter` — cover-letter generate + `cover_letters` persistence (shared with `/cover-letter/claude`).
+
+`/jobs/:id/generate` = `tailorWithCache` (cache) → `createBuilderVersion` (opens in Builder, returns `versionId`) → cover letter **only** when `includeCoverLetter === true`.
+
+### 10.3 Scorer prompt change — JD target-bucket rule (`buildScorerPrompt`)
+
+Triage scores were collapsing: every strong in-lane reach pinned to ~58 (the reach cap doubling as a flat value), so the board couldn't rank similar reaches. Root cause turned out to be **bucketing**, not band-spread: an explicitly entry-level JD (e.g. "ideal for new graduates") was being read as junior+ from its day-to-day responsibilities, making a new-grad candidate a reach. A within-band "spread" experiment was tried and **reverted** — it hurt scorer stability (`validate-prompts` check 7, `matchScore` Δ jumped to 4).
+
+Net change is a **single added bullet** in `buildScorerPrompt` (cap value and candidate-bucket logic untouched): the **JD TARGET-BUCKET RULE** — read the JD's stated seniority literally/deterministically; explicit new-grad/entry-level/"0–2 years"/"no experience required" signals ⇒ `jdTargetBucket = new-grad` (new-grad candidate is **in-bucket**, uncapped); classify junior+ ONLY when the JD states a tenure/seniority bar; when silent on seniority, default the target to the candidate's bucket (in-bucket), not upward.
+
+### 10.4 Env vars
+
+`api/.env.example` documents both (never hardcoded; `api/.env` is gitignored):
+- `INTERNAL_API_KEY` — shared secret for `POST /internal/score-job` (`x-internal-key`).
+- `INTERNAL_USER_ID` — the auth user UUID that owns `scraped_jobs` on the internal path.
+
+### 10.5 Verification (2026-06-22)
+
+- Migration applied + verified (table, RLS on, unique constraint, both indexes, 4 policies).
+- `/internal/score-job`: correct key → 200 with all score fields populated + `status='scored'`; wrong/missing key → 401; row `user_id == INTERNAL_USER_ID` (ownership from env, never body).
+- Board now **spreads and ranks stably** across two runs (real pasted set): entry-level / seniority-silent ML roles **in-bucket ~72**, a "highly skilled / proven expertise" GenAI role **reach 58**, an off-lane GoLang role **28** with a lane warning.
+- `validate-prompts` **8/8** (check 7 stable Δ=0; check 8 ML≫SDET separation held/widened). `tsc` clean on `api` + `web`.
+
+### 10.6 Open caveats / notes
+
+- **`tsx watch` did not reliably hot-reload `prompts.ts`** during testing — a running dev server kept the old prompt until hard-restarted. After any prompt edit, **restart `npm run dev:api`** so the API the UI uses (`:3000`) picks it up. (Existing board rows are re-scored in the DB and display correctly regardless.)
+- The "silent-on-seniority → in-bucket" clause is broad: any JD without a stated tenure bar becomes in-bucket/uncapped (this floated a quantum-domain LLM role to in-bucket/72 above the candidate's exact-specialty GenAI reach). Consistent with bucket-before-bullets; revisit if domain-mismatch should pull silent JDs back to reach.
+- Still open from the manual STEP-4 walkthrough: confirm `POST /jobs/:id/generate` returns a `versionId` + Builder deep-link and that a cover letter is produced **only** under `includeCoverLetter: true` (best verified through the authenticated UI).
