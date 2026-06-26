@@ -2,9 +2,13 @@
   "name": "@jobtracker/api",
   "version": "1.0.0",
   "main": "src/index.ts",
+  "engines": {
+    "node": ">=20"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",
+    "start": "node dist/index.js",
     "test": "tsx tests/normalize.spec.ts && tsx tests/html.spec.ts"
   },
   "dependencies": {
@@ -12,6 +16,7 @@
     "cors": "^2.8.5",
     "dotenv": "^16.3.1",
     "express": "^4.18.2",
+    "express-rate-limit": "^7.5.1",
     "mammoth": "^1.11.0",
     "openai": "^4.0.0",
     "pdf-parse": "^2.4.5",

@@ -1,5 +1,6 @@
 import express from 'express';
 import cors from 'cors';
+import rateLimit from 'express-rate-limit';
 import dotenv from 'dotenv';
 import crypto from 'crypto';
 import { supabase, getAuthClient } from './lib/supabase';
@@ -16,6 +17,10 @@ dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
 const app = express();
 const PORT = process.env.PORT || 3000;
+// Railway (and most PaaS) put the app behind a reverse proxy. Trust the first hop
+// so req.ip reflects the real client (X-Forwarded-For) — required for the /internal
+// rate limiter below to key on the actual caller rather than the proxy.
+app.set('trust proxy', 1);
 
 // helper — lazy OpenAI client that always reads the key fresh
 function getOpenAI() {
@@ -273,8 +278,39 @@ async function generateAndStoreCoverLetter(opts: {
   return { id: saved?.id ?? null, coverLetter, footer: saved?.footer ?? null, fromCache: false };
 }
 
-app.use(cors());
+// CORS — browser calls come from the web app's origin. CORS_ALLOWED_ORIGINS is a
+// comma-separated allowlist (e.g. "https://app.example.com,http://localhost:5173").
+// If it's unset, all origins are allowed (dev-friendly default — set the env var in
+// production to lock the browser surface down). Server-to-server callers (n8n Cloud
+// hitting /internal/*, curl) send no Origin header and are ALWAYS allowed: CORS is a
+// browser-enforced policy and never applies to those requests.
+const corsAllowlist = (process.env.CORS_ALLOWED_ORIGINS || '')
+  .split(',')
+  .map((o) => o.trim())
+  .filter(Boolean);
+app.use(
+  cors({
+    origin(origin, cb) {
+      if (!origin) return cb(null, true); // non-browser (server-to-server) → allow
+      if (corsAllowlist.length === 0) return cb(null, true); // no allowlist → allow all
+      return cb(null, corsAllowlist.includes(origin));
+    },
+  }),
+);
 app.use(express.json({ limit: '20mb' }));
+
+// Rate-limit the public /internal/* machine path so a leaked x-internal-key can't
+// run up unbounded scorer (Anthropic) calls. Fixed 1-minute window, per client IP;
+// INTERNAL_RATE_LIMIT_PER_MIN (default 60) sets the cap. Auth is unchanged — this
+// runs before the handler's x-internal-key check and only throttles request volume.
+const internalLimiter = rateLimit({
+  windowMs: 60 * 1000,
+  limit: Number(process.env.INTERNAL_RATE_LIMIT_PER_MIN) || 60,
+  standardHeaders: true,
+  legacyHeaders: false,
+  message: { success: false, error: 'Rate limit exceeded; slow down.' },
+});
+app.use('/internal', internalLimiter);
 
 // GET: Fetch all applications for the logged-in user
 app.get('/applications', requireAuth, async (req, res) => {
@@ -1834,6 +1870,6 @@ app.patch('/jobs/:id', requireAuth, async (req, res) => {
   return res.json({ success: true, job: data });
 });
 
-app.listen(PORT, () => {
-  console.log(`API Server running on http://localhost:${PORT}`);
+app.listen(Number(PORT), '0.0.0.0', () => {
+  console.log(`API Server running on port ${PORT} (bound 0.0.0.0)`);
 });
