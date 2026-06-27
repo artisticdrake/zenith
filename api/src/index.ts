@@ -12,6 +12,7 @@ import { coverLetterToHtml } from './export/coverLetterToHtml';
 import { normalizeResumeContent, normalizeResumeSettings, normalizeReview } from './lib/normalizeResume';
 import { buildScorerPrompt, buildTailorPrompt, buildAssemblerPrompt, buildCoverLetterPrompt } from './lib/prompts';
 import { sanitizeResumeContent, sanitizeBulletSuggestions, sanitizeResumeText } from './lib/sanitizeResumeText';
+import { runBuiltinScrape, normalizeBuiltinJob } from './lib/apifyBuiltin';
 
 dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
@@ -1632,6 +1633,35 @@ app.post('/internal/score-job', async (req, res) => {
   }
 });
 
+// Shared batch-scoring core. Scores an array of inline jobs sequentially and is
+// fault-isolated: a blank jd_text → { status:'skipped' }; a job that throws →
+// { status:'error', error } — neither aborts the batch. Dedupe-aware via
+// scoreInlineJobForOwner (already-scored postings return free). Used by BOTH
+// /internal/score-jobs and /internal/scrape-and-score so there is ONE loop.
+async function runScoreBatch(
+  ownerId: string, apiKey: string, lib: any, jobs: any[],
+): Promise<{ results: any[]; scored: number; deduped: number; skipped: number; errored: number }> {
+  const results: any[] = [];
+  let scored = 0, deduped = 0, skipped = 0, errored = 0;
+  for (const j of jobs) {
+    const jdText = cleanJdText(j?.jd_text);
+    if (!jdText) {
+      results.push({ jd_hash: null, status: 'skipped', error: 'jd_text is empty' });
+      skipped++;
+      continue;
+    }
+    try {
+      const r = await scoreInlineJobForOwner(ownerId, apiKey, lib, { ...j, jd_text: jdText });
+      results.push({ jd_hash: r.jd_hash, status: r.status, match_score: r.match_score, deduped: r.deduped });
+      if (r.deduped) deduped++; else scored++;
+    } catch (err: any) {
+      results.push({ jd_hash: null, status: 'error', error: err.message });
+      errored++;
+    }
+  }
+  return { results, scored, deduped, skipped, errored };
+}
+
 // ── POST /internal/score-jobs (batch) ──────────────────────────────────────────
 // Batch sibling of /internal/score-job: a scraper hands off a whole morning's
 // scrape in one call. Same x-internal-key auth + INTERNAL_USER_ID owner. Body:
@@ -1659,29 +1689,63 @@ app.post('/internal/score-jobs', async (req, res) => {
     const lib = await loadOwnerProfileOr400(ownerId, res);
     if (!lib) return;
 
-    const results: any[] = [];
-    let scored = 0, deduped = 0, skipped = 0, errored = 0;
-    for (const j of jobs) {
-      const jdText = cleanJdText(j?.jd_text);
-      if (!jdText) {
-        results.push({ jd_hash: null, status: 'skipped', error: 'jd_text is empty' });
-        skipped++;
-        continue;
-      }
-      try {
-        const r = await scoreInlineJobForOwner(ownerId, apiKey, lib, { ...j, jd_text: jdText });
-        results.push({ jd_hash: r.jd_hash, status: r.status, match_score: r.match_score, deduped: r.deduped });
-        if (r.deduped) deduped++; else scored++;
-      } catch (err: any) {
-        results.push({ jd_hash: null, status: 'error', error: err.message });
-        errored++;
-      }
-    }
+    const { results, scored, deduped, skipped, errored } = await runScoreBatch(ownerId, apiKey, lib, jobs);
 
     console.log(`[/internal/score-jobs] ownerId=${ownerId} count=${jobs.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
     return res.json({ success: true, count: jobs.length, scored, deduped, skipped, errored, results });
   } catch (err: any) {
     console.error('[/internal/score-jobs] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
+});
+
+// ── POST /internal/scrape-and-score ─────────────────────────────────────────────
+// One-call scrape→score for the proven BuiltIn source. Scrapes builtin.com (with
+// descriptions enabled), normalizes onto our job shape, drops postings that came
+// back with no description (can't be scored), then runs the SAME batch core as
+// /internal/score-jobs. Same x-internal-key auth + INTERNAL_USER_ID owner. Body:
+// { searchQueries: string[], searchLocation?: string, maxResults?: number }.
+// Guarded by INTERNAL_BATCH_MAX so a big scrape can't fan out unlimited scorer calls.
+app.post('/internal/scrape-and-score', async (req, res) => {
+  const auth = resolveInternalAuth(req, res);
+  if (!auth) return;
+  const { ownerId, apiKey } = auth;
+
+  const { searchQueries, searchLocation, maxResults } = req.body ?? {};
+  const queries = Array.isArray(searchQueries)
+    ? searchQueries.filter((q: any) => typeof q === 'string' && q.trim())
+    : [];
+  if (queries.length === 0) {
+    return res.status(400).json({ success: false, error: 'searchQueries must be a non-empty string array' });
+  }
+
+  const batchMax = Number(process.env.INTERNAL_BATCH_MAX) || 150;
+
+  try {
+    const lib = await loadOwnerProfileOr400(ownerId, res);
+    if (!lib) return;
+
+    const raw = await runBuiltinScrape({ searchQueries: queries, searchLocation, maxResults });
+
+    // Normalize; count + drop jobs that came back without a description.
+    const normalized: any[] = [];
+    let missingDescription = 0;
+    for (const r of raw) {
+      const n = normalizeBuiltinJob(r);
+      if (!n) { missingDescription++; continue; }
+      normalized.push(n);
+    }
+
+    if (normalized.length > batchMax) {
+      return res.status(400).json({ success: false, error: `Scraped ${normalized.length} scorable jobs exceeds INTERNAL_BATCH_MAX (${batchMax}).` });
+    }
+
+    const { results, scored, deduped, skipped, errored } = await runScoreBatch(ownerId, apiKey, lib, normalized);
+
+    console.log(`[/internal/scrape-and-score] ownerId=${ownerId} scraped=${raw.length} missingDescription=${missingDescription} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
+    return res.json({ success: true, scraped: raw.length, missingDescription, count: normalized.length, scored, deduped, skipped, errored, results });
+  } catch (err: any) {
+    console.error('[/internal/scrape-and-score] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
 });
