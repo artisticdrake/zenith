@@ -5,6 +5,7 @@
 import assert from 'node:assert/strict';
 import { normalizeResumeContent, normalizeResumeSettings, normalizeReview } from '../src/lib/normalizeResume';
 import { resumeContentToHtml } from '../src/export/resumeToHtml';
+import { isSeniorTitle } from '../src/lib/apifyBuiltin';
 
 let passed = 0;
 function test(name: string, fn: () => void) {
@@ -129,6 +130,36 @@ test('review: strings-instead-of-arrays and string scores are coerced', () => {
   assert.equal(bs.length, 2);
   assert.deepEqual(bs[0], { section: 'projects', target: 'Acme', guidance: 'g', bullet: 'Did a thing' });
   assert.equal(bs[1].section, 'experience'); // unknown section demoted to default
+});
+
+// ── isSeniorTitle: seniority pre-filter (cost-saving scrape step) ─────────────
+
+test('isSeniorTitle: clear seniority qualifiers ARE filtered', () => {
+  for (const t of [
+    'Senior ML Engineer', 'Sr. Data Engineer', 'Staff Software Engineer',
+    'Principal Engineer', 'Engineering Manager', 'Product Manager',
+    'Director of Data', 'VP, Engineering', 'Head of AI',
+  ]) {
+    assert.equal(isSeniorTitle(t), true, `expected senior: ${t}`);
+  }
+});
+
+test('isSeniorTitle: "lead" filtered only as a standalone seniority word', () => {
+  // Standalone seniority "lead" — filter.
+  assert.equal(isSeniorTitle('Lead Data Engineer'), true);
+  assert.equal(isSeniorTitle('Lead Engineer'), true);
+  assert.equal(isSeniorTitle('Engineering Lead'), true);
+  assert.equal(isSeniorTitle('Tech Lead'), true);
+  // Domain "lead" (lead generation / lead scoring) — must NOT be filtered.
+  assert.equal(isSeniorTitle('Lead Generation Engineer'), false);
+  assert.equal(isSeniorTitle('Data Lead Scoring'), false);
+  assert.equal(isSeniorTitle('Lead Scoring Engineer'), false);
+});
+
+test('isSeniorTitle: IC titles and junk are NOT filtered', () => {
+  for (const t of ['Data Engineer', 'Machine Learning Engineer', 'Software Engineer II', '', null, undefined]) {
+    assert.equal(isSeniorTitle(t as any), false, `expected not-senior: ${t}`);
+  }
 });
 
 // ── resumeContentToHtml never crashes on normalized hostile input ─────────────

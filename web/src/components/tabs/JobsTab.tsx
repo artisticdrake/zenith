@@ -2,7 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Target, Loader2, XCircle, Sparkles, FileText, Mail,
   RefreshCw, Check, SkipForward, Plus, AlertTriangle,
-  Search, ExternalLink,
+  Search, ExternalLink, ChevronDown, ChevronRight, Layers, List,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -28,6 +28,8 @@ interface ScrapedJob {
   bucket_verdict: string | null;
   lane_warning: string | null;
   scored_at: string | null;
+  scraped_at: string | null;
+  scrape_session_id: string | null;
   created_at: string;
 }
 
@@ -43,6 +45,27 @@ function scoreColor(score: number | null): string {
   if (score >= 75) return "text-emerald-400";
   if (score >= 50) return "text-amber-400";
   return "text-red-400";
+}
+
+// Short, locale-friendly date (e.g. "Jun 27") for the history view. Prefers when the
+// job was scored; falls back to when it landed on the board.
+function shortDate(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return d.toLocaleDateString(undefined, { month: "short", day: "numeric" });
+}
+
+// Date + time for a scrape-session divider (e.g. "Jun 27, 2026, 2:14 PM").
+function sessionStamp(iso: string | null): string {
+  if (!iso) return "";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "";
+  return (
+    d.toLocaleDateString(undefined, { month: "short", day: "numeric", year: "numeric" }) +
+    ", " +
+    d.toLocaleTimeString(undefined, { hour: "numeric", minute: "2-digit" })
+  );
 }
 
 // in-bucket vs reach vs off-lane / over-qualified — the triage signal.
@@ -81,7 +104,7 @@ const SCRAPE_PLATFORMS: { id: string; label: string; disabled?: boolean }[] = [
 function ScrapePanel({
   onScrape, scraping, summary,
 }: {
-  onScrape: (b: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number }) => void;
+  onScrape: (b: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number; skipSenior: boolean }) => void;
   scraping: boolean;
   summary: string | null;
 }) {
@@ -89,6 +112,7 @@ function ScrapePanel({
   const [query, setQuery] = useState("");
   const [location, setLocation] = useState("");
   const [count, setCount] = useState(10);
+  const [skipSenior, setSkipSenior] = useState(true);
 
   const submit = () => {
     if (!query.trim() || scraping) return;
@@ -97,6 +121,7 @@ function ScrapePanel({
       searchQueries: [query.trim()],
       searchLocation: location.trim() || undefined,
       maxResults: count,
+      skipSenior,
     });
   };
 
@@ -145,6 +170,16 @@ function ScrapePanel({
           className="h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
         />
       </div>
+
+      <label className="flex items-center gap-2 text-[11.5px] text-muted-foreground cursor-pointer select-none">
+        <input
+          type="checkbox"
+          checked={skipSenior}
+          onChange={e => setSkipSenior(e.target.checked)}
+          className="h-3.5 w-3.5 rounded border-input accent-primary"
+        />
+        Skip senior roles (Senior / Staff / Lead / Manager / Director…) — saves scoring cost
+      </label>
 
       <Button onClick={submit} disabled={!query.trim() || scraping} className="w-full">
         {scraping
@@ -268,6 +303,10 @@ function JobRow({
             {job.company || "Unknown company"}
             {job.location ? ` · ${job.location}` : ""}
             {job.source && job.source !== "manual" ? ` · ${job.source}` : ""}
+            {(() => {
+              const d = shortDate(job.scored_at ?? job.created_at);
+              return d ? ` · ${job.scored_at ? "scored" : "added"} ${d}` : "";
+            })()}
           </p>
           {job.lane_warning && (
             <p className="text-[11px] text-amber-400/90 flex items-start gap-1.5 mt-1.5">
@@ -351,7 +390,6 @@ function JobRow({
 
 const FILTERS: { id: string; label: string }[] = [
   { id: "", label: "All" },
-  { id: "new", label: "New" },
   { id: "scored", label: "Scored" },
   { id: "generated", label: "Generated" },
   { id: "applied", label: "Applied" },
@@ -365,21 +403,28 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
   const [adding, setAdding] = useState(false);
   const [scraping, setScraping] = useState(false);
   const [scrapeSummary, setScrapeSummary] = useState<string | null>(null);
+  const [mode, setMode] = useState<"scrape" | "paste">("scrape");
+  const [view, setView] = useState<"sessions" | "all">("sessions");
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   // Per-row busy action: { [jobId]: 'score' | 'resume' | 'cover' | 'applied' | 'skipped' }
   const [busy, setBusy] = useState<Record<string, string>>({});
+  // Explicit open/closed overrides per session key; unset defaults to "newest open".
+  const [sessionToggles, setSessionToggles] = useState<Record<string, boolean>>({});
 
   const authHeaders = useMemo(
     () => ({ "Content-Type": "application/json", Authorization: `Bearer ${token}` }),
     [token],
   );
 
+  // Fetch the FULL board once (server returns it match_score-desc), then filter and
+  // count client-side — one request, accurate totals for the summary, instant lane
+  // switches. GET /jobs?status= still exists server-side; this view just doesn't use it.
   const fetchJobs = useCallback(async () => {
     if (!token) return;
     setLoading(true);
     try {
-      const res = await fetch(`${API}/jobs${filter ? `?status=${filter}` : ""}`, {
+      const res = await fetch(`${API}/jobs`, {
         headers: { Authorization: `Bearer ${token}` },
       });
       const data = await res.json();
@@ -390,9 +435,63 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
     } finally {
       setLoading(false);
     }
-  }, [token, filter]);
+  }, [token]);
 
   useEffect(() => { fetchJobs(); }, [fetchJobs]);
+
+  // Status counts across the whole board (for the history summary line).
+  const counts = useMemo(() => {
+    const c = { total: jobs.length, scored: 0, generated: 0, applied: 0, skipped: 0 };
+    for (const j of jobs) {
+      if (j.status === "scored") c.scored++;
+      else if (j.status === "generated") c.generated++;
+      else if (j.status === "applied") c.applied++;
+      else if (j.status === "skipped") c.skipped++;
+    }
+    return c;
+  }, [jobs]);
+
+  const visibleJobs = useMemo(
+    () => (filter ? jobs.filter(j => j.status === filter) : jobs),
+    [jobs, filter],
+  );
+
+  // Group the (already status-filtered, match_score-desc) jobs by scrape session.
+  // Real sessions sort newest-first by scraped_at; null-session jobs (manual pastes +
+  // pre-migration rows) collect in an "Ungrouped" group pinned to the bottom. Empty
+  // groups (after filtering) naturally disappear. Within a group, server order
+  // (match_score desc) is preserved.
+  const UNGROUPED = "__ungrouped__";
+  const sessionGroups = useMemo(() => {
+    const map = new Map<string, { key: string; scrapedAt: string | null; jobs: ScrapedJob[] }>();
+    for (const j of visibleJobs) {
+      const key = j.scrape_session_id ?? UNGROUPED;
+      let g = map.get(key);
+      if (!g) { g = { key, scrapedAt: j.scraped_at, jobs: [] }; map.set(key, g); }
+      g.jobs.push(j);
+    }
+    const groups = Array.from(map.values());
+    groups.sort((a, b) => {
+      if (a.key === UNGROUPED) return 1;
+      if (b.key === UNGROUPED) return -1;
+      return (b.scrapedAt ?? "").localeCompare(a.scrapedAt ?? "");
+    });
+    return groups;
+  }, [visibleJobs]);
+
+  // A session is open when explicitly toggled; otherwise only the newest (index 0) is.
+  const isSessionOpen = (key: string, idx: number) => sessionToggles[key] ?? (idx === 0);
+  const toggleSession = (key: string, idx: number) =>
+    setSessionToggles(prev => ({ ...prev, [key]: !(prev[key] ?? (idx === 0)) }));
+
+  const countSummary = useMemo(() => {
+    const parts = [`${counts.total} job${counts.total === 1 ? "" : "s"}`];
+    if (counts.scored) parts.push(`${counts.scored} scored`);
+    if (counts.generated) parts.push(`${counts.generated} generated`);
+    if (counts.applied) parts.push(`${counts.applied} applied`);
+    if (counts.skipped) parts.push(`${counts.skipped} skipped`);
+    return parts.join(" · ");
+  }, [counts]);
 
   const setRowBusy = (id: string, action: string | null) =>
     setBusy(prev => {
@@ -423,7 +522,7 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
   }, [authHeaders, fetchJobs]);
 
   // Scrape a platform, score into the board, then refresh so new jobs rank in.
-  const handleScrape = useCallback(async (body: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number }) => {
+  const handleScrape = useCallback(async (body: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number; skipSenior: boolean }) => {
     setScraping(true);
     setError(null);
     setScrapeSummary(null);
@@ -431,8 +530,10 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
       const res = await fetch(`${API}/jobs/scrape`, { method: "POST", headers: authHeaders, body: JSON.stringify(body) });
       const data = await res.json();
       if (!data.success) throw new Error(data.error || "Scrape failed.");
-      const parts = [`Scraped ${data.scraped}`, `scored ${data.scored}`];
-      if (data.deduped) parts.push(`${data.deduped} already seen`);
+      const parts = [`Scraped ${data.scraped}`];
+      if (data.seniorityFiltered) parts.push(`${data.seniorityFiltered} skipped (senior)`);
+      parts.push(`${data.scored} new`);
+      if (data.deduped) parts.push(`${data.deduped} already seen (deduped)`);
       if (data.skipped) parts.push(`${data.skipped} skipped`);
       if (data.errored) parts.push(`${data.errored} errored`);
       if (data.missingDescription) parts.push(`${data.missingDescription} without description`);
@@ -496,14 +597,48 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
 
   return (
     <div className="space-y-5">
-      <ScrapePanel onScrape={handleScrape} scraping={scraping} summary={scrapeSummary} />
-      <PasteJobBox onAdd={handleAdd} adding={adding} />
+      {/* Source toggle: Scrape vs Paste — both feed the same ranked board below. */}
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+        {(["scrape", "paste"] as const).map(m => (
+          <button
+            key={m}
+            onClick={() => setMode(m)}
+            className={cn(
+              "flex-1 h-8 rounded-md text-[12px] font-medium transition-colors capitalize flex items-center justify-center gap-1.5",
+              mode === m ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            {m === "scrape" ? <Search className="h-3.5 w-3.5" /> : <Plus className="h-3.5 w-3.5" />}
+            {m}
+          </button>
+        ))}
+      </div>
+
+      {mode === "scrape"
+        ? <ScrapePanel onScrape={handleScrape} scraping={scraping} summary={scrapeSummary} />
+        : <PasteJobBox onAdd={handleAdd} adding={adding} />}
 
       {error && (
         <p className="text-[12px] text-destructive flex items-center gap-1.5">
           <XCircle className="h-3.5 w-3.5 shrink-0" />{error}
         </p>
       )}
+
+      {/* Board view: grouped by scrape session vs one flat ranked list. */}
+      <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1">
+        {([["sessions", "Sessions", Layers], ["all", "All jobs", List]] as const).map(([id, label, Icon]) => (
+          <button
+            key={id}
+            onClick={() => setView(id)}
+            className={cn(
+              "flex-1 h-8 rounded-md text-[12px] font-medium transition-colors flex items-center justify-center gap-1.5",
+              view === id ? "bg-primary/10 text-primary" : "text-muted-foreground hover:text-foreground",
+            )}
+          >
+            <Icon className="h-3.5 w-3.5" />{label}
+          </button>
+        ))}
+      </div>
 
       {/* Filter bar */}
       <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-1 overflow-x-auto">
@@ -521,6 +656,11 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
         ))}
       </div>
 
+      {/* History summary — totals across the whole board */}
+      {jobs.length > 0 && (
+        <p className="text-[11.5px] text-muted-foreground font-label px-1 -mt-1">{countSummary}</p>
+      )}
+
       {/* List */}
       {loading ? (
         <div className="rounded-xl border border-border bg-card p-8 flex flex-col items-center gap-3">
@@ -531,11 +671,17 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
         <div className="rounded-xl border border-dashed border-border bg-card/50 p-10 flex flex-col items-center gap-2 text-center">
           <Target className="h-8 w-8 text-muted-foreground/40" />
           <p className="text-sm text-muted-foreground">No jobs yet.</p>
-          <p className="text-[12px] text-muted-foreground/60">Paste a job description above to start triaging.</p>
+          <p className="text-[12px] text-muted-foreground/60">Scrape a board or paste a job description above to start triaging.</p>
         </div>
-      ) : (
+      ) : visibleJobs.length === 0 ? (
+        <div className="rounded-xl border border-dashed border-border bg-card/50 p-10 flex flex-col items-center gap-2 text-center">
+          <Target className="h-8 w-8 text-muted-foreground/40" />
+          <p className="text-sm text-muted-foreground">No jobs in this lane.</p>
+          <p className="text-[12px] text-muted-foreground/60">Switch the filter above to see other jobs.</p>
+        </div>
+      ) : view === "all" ? (
         <div className="space-y-3">
-          {jobs.map(job => (
+          {visibleJobs.map(job => (
             <JobRow
               key={job.id}
               job={job}
@@ -545,6 +691,41 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
               onPatch={handlePatch}
             />
           ))}
+        </div>
+      ) : (
+        <div className="space-y-4">
+          {sessionGroups.map((g, idx) => {
+            const open = isSessionOpen(g.key, idx);
+            const isUngrouped = g.key === UNGROUPED;
+            return (
+              <div key={g.key} className="space-y-3">
+                <button
+                  onClick={() => toggleSession(g.key, idx)}
+                  className="w-full flex items-center gap-2 text-left text-[11.5px] text-muted-foreground hover:text-foreground transition-colors border-b border-border pb-1.5"
+                >
+                  {open ? <ChevronDown className="h-3.5 w-3.5 shrink-0" /> : <ChevronRight className="h-3.5 w-3.5 shrink-0" />}
+                  <span className="font-label uppercase tracking-wider">
+                    {isUngrouped ? "Ungrouped" : `Scraped ${sessionStamp(g.scrapedAt)}`}
+                  </span>
+                  <span className="text-muted-foreground/60">· {g.jobs.length} job{g.jobs.length === 1 ? "" : "s"}</span>
+                </button>
+                {open && (
+                  <div className="space-y-3">
+                    {g.jobs.map(job => (
+                      <JobRow
+                        key={job.id}
+                        job={job}
+                        busy={busy[job.id] ?? null}
+                        onGenerate={handleGenerate}
+                        onScore={handleScore}
+                        onPatch={handlePatch}
+                      />
+                    ))}
+                  </div>
+                )}
+              </div>
+            );
+          })}
         </div>
       )}
     </div>

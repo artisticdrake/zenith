@@ -1534,6 +1534,7 @@ const postedAtOrNull = (v: any): string | null => {
 async function scoreInlineJobForOwner(
   ownerId: string, apiKey: string, lib: any,
   input: { jd_text: string; title?: any; company?: any; location?: any; url?: any; source?: any; posted_at?: any },
+  opts: { scrapeSessionId?: string; scrapedAt?: string } = {},
 ): Promise<{ jd_hash: string; status: string; match_score: number | null; deduped: boolean; job: any }> {
   const jdText = cleanJdText(input.jd_text);
   const jdHash = hashJD(jdText);
@@ -1541,24 +1542,32 @@ async function scoreInlineJobForOwner(
   const { data: existing, error: exErr } = await supabase
     .from('scraped_jobs').select('*').eq('user_id', ownerId).eq('jd_hash', jdHash).maybeSingle();
   if (exErr) throw new Error(exErr.message);
+  // DEDUPE: an already-scored row is returned untouched — so it KEEPS its original
+  // scrape_session_id and is not re-stamped into a later scrape's session.
   if (existing && existing.status === 'scored') {
     return { jd_hash: jdHash, status: existing.status, match_score: existing.match_score, deduped: true, job: existing };
   }
 
-  // Insert new / refresh an unscored row's metadata, then score it.
+  // Insert new / refresh an unscored row's metadata, then score it. The scrape-session
+  // stamp is only set when the caller (/jobs/scrape) provides it; omitting the keys
+  // leaves any existing values untouched, so internal/manual paths are unchanged.
+  const upsertRow: Record<string, any> = {
+    user_id: ownerId,
+    source: normalizeSource(input.source),
+    title: typeof input.title === 'string' ? input.title : null,
+    company: typeof input.company === 'string' ? input.company : null,
+    location: typeof input.location === 'string' ? input.location : null,
+    url: typeof input.url === 'string' ? input.url : null,
+    posted_at: postedAtOrNull(input.posted_at),
+    jd_text: jdText,
+    jd_hash: jdHash,
+  };
+  if (opts.scrapeSessionId !== undefined) upsertRow.scrape_session_id = opts.scrapeSessionId;
+  if (opts.scrapedAt !== undefined) upsertRow.scraped_at = opts.scrapedAt;
+
   const { data: job, error: upErr } = await supabase
     .from('scraped_jobs')
-    .upsert({
-      user_id: ownerId,
-      source: normalizeSource(input.source),
-      title: typeof input.title === 'string' ? input.title : null,
-      company: typeof input.company === 'string' ? input.company : null,
-      location: typeof input.location === 'string' ? input.location : null,
-      url: typeof input.url === 'string' ? input.url : null,
-      posted_at: postedAtOrNull(input.posted_at),
-      jd_text: jdText,
-      jd_hash: jdHash,
-    }, { onConflict: 'user_id,jd_hash' })
+    .upsert(upsertRow, { onConflict: 'user_id,jd_hash' })
     .select().single();
   if (upErr) throw new Error(upErr.message);
 
@@ -1645,6 +1654,7 @@ app.post('/internal/score-job', async (req, res) => {
 // /internal/score-jobs and /internal/scrape-and-score so there is ONE loop.
 async function runScoreBatch(
   ownerId: string, apiKey: string, lib: any, jobs: any[],
+  opts: { scrapeSessionId?: string; scrapedAt?: string } = {},
 ): Promise<{ results: any[]; scored: number; deduped: number; skipped: number; errored: number }> {
   const results: any[] = [];
   let scored = 0, deduped = 0, skipped = 0, errored = 0;
@@ -1656,7 +1666,7 @@ async function runScoreBatch(
       continue;
     }
     try {
-      const r = await scoreInlineJobForOwner(ownerId, apiKey, lib, { ...j, jd_text: jdText });
+      const r = await scoreInlineJobForOwner(ownerId, apiKey, lib, { ...j, jd_text: jdText }, opts);
       results.push({ jd_hash: r.jd_hash, status: r.status, match_score: r.match_score, deduped: r.deduped });
       if (r.deduped) deduped++; else scored++;
     } catch (err: any) {
@@ -1817,7 +1827,7 @@ app.post('/jobs/scrape', requireAuth, async (req, res) => {
     return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
   }
 
-  const { platform, searchQueries, searchLocation, maxResults } = req.body ?? {};
+  const { platform, searchQueries, searchLocation, maxResults, skipSenior } = req.body ?? {};
   if (typeof platform !== 'string' || !SCRAPE_PLATFORMS.has(platform)) {
     return res.status(400).json({ success: false, error: `Platform "${platform ?? ''}" is not yet supported. Only 'builtin' is available right now.` });
   }
@@ -1829,21 +1839,29 @@ app.post('/jobs/scrape', requireAuth, async (req, res) => {
   }
   const cappedMax = Math.max(1, Math.min(Number(maxResults) || 10, JOBS_SCRAPE_MAX));
   const batchMax = Number(process.env.INTERNAL_BATCH_MAX) || 150;
+  // Cost-saving seniority pre-filter is ON unless the client explicitly opts out.
+  const skipSeniorRoles = skipSenior !== false;
 
   try {
     const lib = await loadOwnerProfileOr400(userId, res, 'Your master profile is empty — build it first before scraping.');
     if (!lib) return;
 
-    const { scraped, normalized, missingDescription } = await scrapeAndNormalizeBuiltin({ searchQueries: queries, searchLocation, maxResults: cappedMax });
+    const { scraped, normalized, missingDescription, seniorityFiltered } =
+      await scrapeAndNormalizeBuiltin({ searchQueries: queries, searchLocation, maxResults: cappedMax }, { skipSenior: skipSeniorRoles });
 
     if (normalized.length > batchMax) {
       return res.status(400).json({ success: false, error: `Scraped ${normalized.length} scorable jobs exceeds INTERNAL_BATCH_MAX (${batchMax}).` });
     }
 
-    const { results, scored, deduped, skipped, errored } = await runScoreBatch(userId, apiKey, lib, normalized);
+    // One scrape call = one session: every row written here shares this id + timestamp
+    // so the UI can group a scrape's results. Deduped rows keep their original session.
+    const scrapeSessionId = crypto.randomUUID();
+    const scrapedAt = new Date().toISOString();
+    const { results, scored, deduped, skipped, errored } =
+      await runScoreBatch(userId, apiKey, lib, normalized, { scrapeSessionId, scrapedAt });
 
-    console.log(`[/jobs/scrape] userId=${userId} platform=${platform} scraped=${scraped} missingDescription=${missingDescription} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
-    return res.json({ success: true, platform, scraped, missingDescription, count: normalized.length, scored, deduped, skipped, errored, results });
+    console.log(`[/jobs/scrape] userId=${userId} platform=${platform} session=${scrapeSessionId} scraped=${scraped} missingDescription=${missingDescription} seniorityFiltered=${seniorityFiltered} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
+    return res.json({ success: true, platform, scrapeSessionId, scraped, missingDescription, seniorityFiltered, count: normalized.length, scored, deduped, skipped, errored, results });
   } catch (err: any) {
     console.error('[/jobs/scrape] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
