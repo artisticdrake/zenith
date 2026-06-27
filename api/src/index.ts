@@ -12,7 +12,7 @@ import { coverLetterToHtml } from './export/coverLetterToHtml';
 import { normalizeResumeContent, normalizeResumeSettings, normalizeReview } from './lib/normalizeResume';
 import { buildScorerPrompt, buildTailorPrompt, buildAssemblerPrompt, buildCoverLetterPrompt } from './lib/prompts';
 import { sanitizeResumeContent, sanitizeBulletSuggestions, sanitizeResumeText } from './lib/sanitizeResumeText';
-import { runBuiltinScrape, normalizeBuiltinJob } from './lib/apifyBuiltin';
+import { scrapeAndNormalizeBuiltin } from './lib/apifyBuiltin';
 
 dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
@@ -1573,13 +1573,18 @@ async function scoreInlineJobForOwner(
 }
 
 // Load the owner's master profile (service-role), or send a 400 and return null
-// if it's empty (can't score against nothing). Shared by both internal endpoints.
-async function loadOwnerProfileOr400(ownerId: string, res: express.Response): Promise<any | null> {
+// if it's empty (can't score against nothing). Shared by the internal endpoints and
+// /jobs/scrape. The empty-profile message defaults to the internal wording; callers
+// (e.g. the user-facing route) can pass friendlier copy without forking the function.
+async function loadOwnerProfileOr400(
+  ownerId: string, res: express.Response,
+  emptyMessage = 'Owner master profile is empty; cannot score.',
+): Promise<any | null> {
   const { data: profileRow } = await supabase
     .from('master_profile').select('content').eq('user_id', ownerId).maybeSingle();
   const lib = profileRow?.content;
   if (!lib?.experiences?.length && !lib?.projects?.length) {
-    res.status(400).json({ success: false, error: 'Owner master profile is empty; cannot score.' });
+    res.status(400).json({ success: false, error: emptyMessage });
     return null;
   }
   return lib;
@@ -1725,16 +1730,7 @@ app.post('/internal/scrape-and-score', async (req, res) => {
     const lib = await loadOwnerProfileOr400(ownerId, res);
     if (!lib) return;
 
-    const raw = await runBuiltinScrape({ searchQueries: queries, searchLocation, maxResults });
-
-    // Normalize; count + drop jobs that came back without a description.
-    const normalized: any[] = [];
-    let missingDescription = 0;
-    for (const r of raw) {
-      const n = normalizeBuiltinJob(r);
-      if (!n) { missingDescription++; continue; }
-      normalized.push(n);
-    }
+    const { scraped, normalized, missingDescription } = await scrapeAndNormalizeBuiltin({ searchQueries: queries, searchLocation, maxResults });
 
     if (normalized.length > batchMax) {
       return res.status(400).json({ success: false, error: `Scraped ${normalized.length} scorable jobs exceeds INTERNAL_BATCH_MAX (${batchMax}).` });
@@ -1742,8 +1738,8 @@ app.post('/internal/scrape-and-score', async (req, res) => {
 
     const { results, scored, deduped, skipped, errored } = await runScoreBatch(ownerId, apiKey, lib, normalized);
 
-    console.log(`[/internal/scrape-and-score] ownerId=${ownerId} scraped=${raw.length} missingDescription=${missingDescription} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
-    return res.json({ success: true, scraped: raw.length, missingDescription, count: normalized.length, scored, deduped, skipped, errored, results });
+    console.log(`[/internal/scrape-and-score] ownerId=${ownerId} scraped=${scraped} missingDescription=${missingDescription} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
+    return res.json({ success: true, scraped, missingDescription, count: normalized.length, scored, deduped, skipped, errored, results });
   } catch (err: any) {
     console.error('[/internal/scrape-and-score] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
@@ -1802,6 +1798,56 @@ app.get('/jobs', requireAuth, async (req, res) => {
   const { data, error } = await query;
   if (error) return res.status(400).json({ success: false, error: error.message });
   return res.json({ success: true, jobs: data ?? [] });
+});
+
+// ── POST /jobs/scrape ───────────────────────────────────────────────────────────
+// User-facing scrape→score. Runs as the AUTHENTICATED user (not the internal key):
+// scrapes the chosen platform, normalizes, and scores into the user's own
+// scraped_jobs board via the SAME core as /internal/scrape-and-score (shared
+// scrapeAndNormalizeBuiltin + runScoreBatch). Only 'builtin' is wired up today;
+// other platforms are rejected as not-yet-supported. maxResults is capped so a big
+// number can't run up scrape/scorer cost.
+const SCRAPE_PLATFORMS = new Set(['builtin']);
+const JOBS_SCRAPE_MAX = 50;
+
+app.post('/jobs/scrape', requireAuth, async (req, res) => {
+  const userId = (req as any).user.id;
+  const apiKey = process.env.ANTHROPIC_API_KEY;
+  if (!apiKey) {
+    return res.status(500).json({ success: false, error: 'ANTHROPIC_API_KEY is not configured on the server.' });
+  }
+
+  const { platform, searchQueries, searchLocation, maxResults } = req.body ?? {};
+  if (typeof platform !== 'string' || !SCRAPE_PLATFORMS.has(platform)) {
+    return res.status(400).json({ success: false, error: `Platform "${platform ?? ''}" is not yet supported. Only 'builtin' is available right now.` });
+  }
+  const queries = Array.isArray(searchQueries)
+    ? searchQueries.filter((q: any) => typeof q === 'string' && q.trim())
+    : [];
+  if (queries.length === 0) {
+    return res.status(400).json({ success: false, error: 'searchQueries must be a non-empty string array' });
+  }
+  const cappedMax = Math.max(1, Math.min(Number(maxResults) || 10, JOBS_SCRAPE_MAX));
+  const batchMax = Number(process.env.INTERNAL_BATCH_MAX) || 150;
+
+  try {
+    const lib = await loadOwnerProfileOr400(userId, res, 'Your master profile is empty — build it first before scraping.');
+    if (!lib) return;
+
+    const { scraped, normalized, missingDescription } = await scrapeAndNormalizeBuiltin({ searchQueries: queries, searchLocation, maxResults: cappedMax });
+
+    if (normalized.length > batchMax) {
+      return res.status(400).json({ success: false, error: `Scraped ${normalized.length} scorable jobs exceeds INTERNAL_BATCH_MAX (${batchMax}).` });
+    }
+
+    const { results, scored, deduped, skipped, errored } = await runScoreBatch(userId, apiKey, lib, normalized);
+
+    console.log(`[/jobs/scrape] userId=${userId} platform=${platform} scraped=${scraped} missingDescription=${missingDescription} scorable=${normalized.length} scored=${scored} deduped=${deduped} skipped=${skipped} errored=${errored}`);
+    return res.json({ success: true, platform, scraped, missingDescription, count: normalized.length, scored, deduped, skipped, errored, results });
+  } catch (err: any) {
+    console.error('[/jobs/scrape] error:', err.message);
+    return res.status(500).json({ success: false, error: err.message });
+  }
 });
 
 // ── POST /jobs/:id/score ──────────────────────────────────────────────────────

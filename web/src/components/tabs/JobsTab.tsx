@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useState } from "react";
 import {
   Target, Loader2, XCircle, Sparkles, FileText, Mail,
   RefreshCw, Check, SkipForward, Plus, AlertTriangle,
+  Search, ExternalLink,
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
@@ -65,6 +66,98 @@ function Badge({ label, cls }: { label: string; cls: string }) {
     <span className={cn("text-[10px] font-black uppercase tracking-widest px-2 py-0.5 rounded border shrink-0", cls)}>
       {label}
     </span>
+  );
+}
+
+// ── Scrape panel ──────────────────────────────────────────────────────────────
+
+const SCRAPE_COUNTS = [5, 10, 25];
+const SCRAPE_PLATFORMS: { id: string; label: string; disabled?: boolean }[] = [
+  { id: "builtin", label: "BuiltIn" },
+  { id: "linkedin", label: "LinkedIn (coming soon)", disabled: true },
+  { id: "indeed", label: "Indeed (coming soon)", disabled: true },
+];
+
+function ScrapePanel({
+  onScrape, scraping, summary,
+}: {
+  onScrape: (b: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number }) => void;
+  scraping: boolean;
+  summary: string | null;
+}) {
+  const [platform, setPlatform] = useState("builtin");
+  const [query, setQuery] = useState("");
+  const [location, setLocation] = useState("");
+  const [count, setCount] = useState(10);
+
+  const submit = () => {
+    if (!query.trim() || scraping) return;
+    onScrape({
+      platform,
+      searchQueries: [query.trim()],
+      searchLocation: location.trim() || undefined,
+      maxResults: count,
+    });
+  };
+
+  return (
+    <div className="rounded-xl border border-border bg-card p-5 space-y-3">
+      <div className="flex items-center gap-2">
+        <Search className="h-4 w-4 text-primary" />
+        <h2 className="font-semibold text-sm text-foreground">Scrape jobs</h2>
+      </div>
+      <p className="text-[11px] text-muted-foreground -mt-1">
+        Pull live postings from a job board — each is scored against your Master Profile and ranked into the board below.
+      </p>
+
+      <div className="grid grid-cols-2 gap-2">
+        <select
+          value={platform}
+          onChange={e => setPlatform(e.target.value)}
+          className="h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          {SCRAPE_PLATFORMS.map(p => (
+            <option key={p.id} value={p.id} disabled={p.disabled}>{p.label}</option>
+          ))}
+        </select>
+        <select
+          value={count}
+          onChange={e => setCount(Number(e.target.value))}
+          className="h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground focus:outline-none focus:ring-1 focus:ring-ring"
+        >
+          {SCRAPE_COUNTS.map(c => <option key={c} value={c}>{c} jobs</option>)}
+        </select>
+      </div>
+
+      <div className="grid grid-cols-2 gap-2">
+        <input
+          value={query}
+          onChange={e => setQuery(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          placeholder="Keywords, e.g. machine learning engineer"
+          className="h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+        <input
+          value={location}
+          onChange={e => setLocation(e.target.value)}
+          onKeyDown={e => { if (e.key === "Enter") submit(); }}
+          placeholder="Location (optional), e.g. Boston"
+          className="h-8 rounded-md border border-input bg-input px-2 text-[12px] text-foreground placeholder:text-muted-foreground/50 focus:outline-none focus:ring-1 focus:ring-ring"
+        />
+      </div>
+
+      <Button onClick={submit} disabled={!query.trim() || scraping} className="w-full">
+        {scraping
+          ? <><Loader2 className="h-4 w-4 animate-spin mr-2" />Scraping &amp; ranking…</>
+          : <><Search className="h-4 w-4 mr-2" />Scrape &amp; Rank</>}
+      </Button>
+
+      {summary && (
+        <p className="text-[11px] text-muted-foreground flex items-center gap-1.5">
+          <Check className="h-3 w-3 text-emerald-400 shrink-0" />{summary}
+        </p>
+      )}
+    </div>
   );
 }
 
@@ -220,6 +313,17 @@ function JobRow({
             {busy === "score" ? <Loader2 className="h-3 w-3 animate-spin" /> : <RefreshCw className="h-3 w-3" />}
             Re-score
           </button>
+          {job.url && (
+            <a
+              href={job.url}
+              target="_blank"
+              rel="noopener noreferrer"
+              title="Open the job posting in a new tab"
+              className="text-[11px] text-primary hover:text-primary/80 hover:underline flex items-center gap-1 transition-colors"
+            >
+              <ExternalLink className="h-3 w-3" />Apply
+            </a>
+          )}
 
           <div className="ml-auto flex items-center gap-2">
             <button
@@ -259,6 +363,8 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
   const [jobs, setJobs] = useState<ScrapedJob[]>([]);
   const [loading, setLoading] = useState(true);
   const [adding, setAdding] = useState(false);
+  const [scraping, setScraping] = useState(false);
+  const [scrapeSummary, setScrapeSummary] = useState<string | null>(null);
   const [filter, setFilter] = useState("");
   const [error, setError] = useState<string | null>(null);
   // Per-row busy action: { [jobId]: 'score' | 'resume' | 'cover' | 'applied' | 'skipped' }
@@ -316,6 +422,29 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
     }
   }, [authHeaders, fetchJobs]);
 
+  // Scrape a platform, score into the board, then refresh so new jobs rank in.
+  const handleScrape = useCallback(async (body: { platform: string; searchQueries: string[]; searchLocation?: string; maxResults: number }) => {
+    setScraping(true);
+    setError(null);
+    setScrapeSummary(null);
+    try {
+      const res = await fetch(`${API}/jobs/scrape`, { method: "POST", headers: authHeaders, body: JSON.stringify(body) });
+      const data = await res.json();
+      if (!data.success) throw new Error(data.error || "Scrape failed.");
+      const parts = [`Scraped ${data.scraped}`, `scored ${data.scored}`];
+      if (data.deduped) parts.push(`${data.deduped} already seen`);
+      if (data.skipped) parts.push(`${data.skipped} skipped`);
+      if (data.errored) parts.push(`${data.errored} errored`);
+      if (data.missingDescription) parts.push(`${data.missingDescription} without description`);
+      setScrapeSummary(parts.join(" · "));
+      await fetchJobs();
+    } catch (e: any) {
+      setError(e?.message || "Scrape failed.");
+    } finally {
+      setScraping(false);
+    }
+  }, [authHeaders, fetchJobs]);
+
   const handleScore = useCallback(async (id: string) => {
     setRowBusy(id, "score");
     setError(null);
@@ -367,6 +496,7 @@ export default function JobsTab({ session, onOpenBuilder }: Props) {
 
   return (
     <div className="space-y-5">
+      <ScrapePanel onScrape={handleScrape} scraping={scraping} summary={scrapeSummary} />
       <PasteJobBox onAdd={handleAdd} adding={adding} />
 
       {error && (
