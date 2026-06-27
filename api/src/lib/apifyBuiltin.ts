@@ -81,6 +81,25 @@ export async function runBuiltinScrape(params: BuiltinScrapeParams): Promise<any
   return all.slice(0, maxResults);
 }
 
+// Scrape BuiltIn and normalize in one step — the shared scrape→normalize core used
+// by both the internal machine route and the user-facing /jobs/scrape. Returns the
+// raw count, the scorable (description-bearing) jobs, and how many were dropped for
+// having no description. Scoring is intentionally left to the caller (each route
+// owns its owner + batch guard).
+export async function scrapeAndNormalizeBuiltin(
+  params: BuiltinScrapeParams,
+): Promise<{ scraped: number; normalized: NormalizedJob[]; missingDescription: number }> {
+  const raw = await runBuiltinScrape(params);
+  const normalized: NormalizedJob[] = [];
+  let missingDescription = 0;
+  for (const r of raw) {
+    const n = normalizeBuiltinJob(r);
+    if (!n) { missingDescription++; continue; }
+    normalized.push(n);
+  }
+  return { scraped: raw.length, normalized, missingDescription };
+}
+
 // Map one raw BuiltIn job onto our NormalizedJob. Returns null when the description
 // is empty/missing — those can't be scored (the pipeline is keyed on jd_text), so
 // the caller counts and skips them rather than storing an unscorable row.
