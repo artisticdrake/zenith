@@ -10,6 +10,8 @@
     "dev:web": "npm run dev --workspace=web",
     "dev:api": "npm run dev --workspace=api",
     "build:ext": "npm run build --workspace=extension",
+    "build": "npm run build --workspace=api",
+    "start": "npm run start --workspace=api",
     "lint": "npm run lint --workspaces",
     "test": "npm run test --workspaces --if-present"
   },
