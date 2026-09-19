@@ -6,6 +6,7 @@ import { useResumeData } from '@/hooks/useResumeData';
 import { useAutoFit } from '@/hooks/useAutoFit';
 import { usePDFExport } from '@/components/resume/export/generatePDF';
 import { cn } from '@/lib/utils';
+import { generationRequest } from '@/lib/generationRequest';
 import ResumeToolbar from './toolbar/ResumeToolbar';
 import EditorPanel from './editor/EditorPanel';
 import PreviewPanel from './preview/PreviewPanel';
@@ -173,7 +174,7 @@ export default function ResumeBuilderLayout({ session, assembleResult, onDismiss
     if (!jd) return;
     setReassembling(true);
     try {
-      const res = await fetch(`${API}/assemble/claude`, {
+      const data = await generationRequest(`${API}/assemble/claude`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${session.access_token}` },
         body: JSON.stringify({
@@ -181,8 +182,6 @@ export default function ResumeBuilderLayout({ session, assembleResult, onDismiss
           applicationId: activeVersion?.application_id ?? undefined,
         }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || 'Re-assemble failed.');
       adoptServerVersion(data.version);
       setBanner({ score: data.score ?? null, changeLog: data.changeLog ?? [], at: Date.now() });
     } catch (e: any) {

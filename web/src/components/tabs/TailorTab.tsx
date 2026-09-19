@@ -7,6 +7,7 @@ import {
 } from "lucide-react";
 import { Button } from "@/components/ui/button";
 import { cn } from "@/lib/utils";
+import { generationRequest } from "@/lib/generationRequest";
 import type { JobApplication } from "@/lib/types";
 import type { ApprovedBullet, BulletSuggestion } from "@/lib/bulletSuggestions";
 
@@ -742,7 +743,7 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
     setCommitted(false);
 
     try {
-      const res = await fetch(`${API}/tailor/claude`, {
+      const data = await generationRequest(`${API}/tailor/claude`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -753,8 +754,6 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
           applicationId: linkedAppId || undefined,
         }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error);
       setResult(data);
     } catch (e: any) {
       setGenError(e.message);
@@ -774,7 +773,7 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
     setAssembleError(null);
     try {
       const linkedApp = linkedAppId ? apps.find(a => a.id === linkedAppId) : null;
-      const res = await fetch(`${API}/assemble/claude`, {
+      const data = await generationRequest(`${API}/assemble/claude`, {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
@@ -789,8 +788,6 @@ export default function TailorTab({ apps, session, onAssembled }: Props) {
           applicationId: linkedAppId || undefined,
         }),
       });
-      const data = await res.json();
-      if (!data.success) throw new Error(data.error || "Assembly failed.");
       onAssembled({ score: data.score ?? null, changeLog: data.changeLog ?? [], at: Date.now() });
     } catch (e: any) {
       setAssembleError(e?.message || "Assembly failed.");

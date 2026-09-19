@@ -1,5 +1,4 @@
 import dns from 'dns';
-import https from 'https';
 import express from 'express';
 import cors from 'cors';
 import rateLimit from 'express-rate-limit';
@@ -22,6 +21,8 @@ import { buildScorerPrompt, buildTailorPrompt, buildAssemblerPrompt, buildCoverL
 import { sanitizeResumeContent, sanitizeBulletSuggestions, sanitizeResumeText } from './lib/sanitizeResumeText';
 import { scrapeAndNormalizeBuiltin } from './lib/apifyBuiltin';
 import { logLlmCall, callOpenAIChat, type LlmCallMeta } from './lib/llmLog';
+import { postClaudeMessage } from './lib/claudeTransport';
+import { longJsonRoute } from './lib/longJsonRoute';
 
 dotenv.config({ path: require('path').resolve(__dirname, '../.env') });
 
@@ -46,50 +47,6 @@ const hashProfile = (lib: unknown) => sha(JSON.stringify(lib ?? {}));
 // exposes — so a score keyed on it always matches what a recruiter's parser reads.
 const hashContent = (rc: unknown) => sha(resumeContentToText(rc as any));
 
-// Node's global `fetch` (undici) negotiates TLS/HTTP more strictly than the
-// classic `https` module — on machines where antivirus or a corporate proxy does
-// HTTPS/SSL inspection (Kaspersky, Avast, Bitdefender, ESET, Zscaler, etc.), that
-// stricter negotiation gets the connection reset mid-request ("other side closed",
-// UND_ERR_SOCKET), even though those same tools intercept classic `https` requests
-// fine. Anthropic's API is the one truly load-bearing external call in this app, so
-// it goes through `https` directly rather than fetch to sidestep that failure mode.
-function httpsPostJson(url: string, headers: Record<string, string>, body: string, timeoutMs = 120_000): Promise<{ status: number; json: any }> {
-  return new Promise((resolve, reject) => {
-    const u = new URL(url);
-    const req = https.request({
-      hostname: u.hostname,
-      path: u.pathname + u.search,
-      method: 'POST',
-      headers: { ...headers, 'Content-Length': Buffer.byteLength(body) },
-      timeout: timeoutMs,
-    }, (res) => {
-      let data = '';
-      res.setEncoding('utf8');
-      res.on('data', (chunk) => { data += chunk; });
-      res.on('end', () => {
-        try {
-          resolve({ status: res.statusCode ?? 0, json: data ? JSON.parse(data) : {} });
-        } catch (e: any) {
-          reject(new Error(`Failed to parse Anthropic response as JSON: ${e.message}`));
-        }
-      });
-    });
-    // A tailor/assemble call sends a large prompt then sits waiting — this is a
-    // non-streaming request, so it's silent while Claude generates up to several
-    // thousand tokens (can be 20-60+s with zero bytes on the wire). Home routers/
-    // NATs commonly reset TCP connections they judge "idle" well within that
-    // window ("socket hang up" / ECONNRESET). TCP keep-alive probes keep the
-    // connection looking active so it survives the quiet generation time.
-    req.on('socket', (socket) => {
-      socket.setKeepAlive(true, 10_000);
-    });
-    req.on('timeout', () => req.destroy(new Error('Request to Anthropic timed out')));
-    req.on('error', reject);
-    req.write(body);
-    req.end();
-  });
-}
-
 // ── Claude helpers (shared cores) ─────────────────────────────────────────────
 // The tailor / scorer / assembler / cover-letter routes and the new job-triage
 // routes all talk to Claude the SAME way: claude-sonnet-4-6, temperature 0,
@@ -102,17 +59,17 @@ async function callClaudeJSON(apiKey: string, system: string, user: string, maxT
   let ok: boolean;
   let responseData: any;
   try {
-    const { status, json } = await httpsPostJson('https://api.anthropic.com/v1/messages', {
+    const { status, json } = await postClaudeMessage('https://api.anthropic.com/v1/messages', {
       'Content-Type': 'application/json',
       'x-api-key': apiKey,
       'anthropic-version': '2023-06-01',
-    }, JSON.stringify({
+    }, {
       model: MODEL,
       max_tokens: maxTokens,
       temperature: 0,
       system,
       messages: [{ role: 'user', content: user }],
-    }));
+    });
     ok = status >= 200 && status < 300;
     responseData = json;
   } catch (err: any) {
@@ -1000,7 +957,7 @@ app.post('/parse-text', requireAuth, async (req, res) => {
 // Results are cached in tailor_results keyed on (user_id, jd_hash, profile_hash):
 // the same JD + unchanged Master Profile returns the stored result without
 // calling Claude again. Editing the JD or the profile busts the cache naturally.
-app.post('/tailor/claude', requireAuth, async (req, res) => {
+app.post('/tailor/claude', requireAuth, longJsonRoute(async (req, res) => {
   const userId = (req as any).user.id;
   const authClient = getAuthClient(req.headers.authorization as string);
   const { jobDescription, applicationId } = req.body;
@@ -1038,7 +995,7 @@ app.post('/tailor/claude', requireAuth, async (req, res) => {
     console.error('[/tailor/claude] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
-});
+}));
 
 // ── Commit an already-tailored resume to the Builder — NO Claude call ──────────
 // POST /tailor/commit
@@ -1179,7 +1136,7 @@ app.post('/rerank/claude', requireAuth, async (req, res) => {
 // approved new bullets as candidate "blocks", and asks Claude to assemble the single
 // best one-page resume. Writes the result as a NEW resume_builder version (never
 // overwrites the previous one). Returns { version, resumeContent, score, changeLog }.
-app.post('/assemble/claude', requireAuth, async (req, res) => {
+app.post('/assemble/claude', requireAuth, longJsonRoute(async (req, res) => {
   const userId = (req as any).user.id;
   const authClient = getAuthClient(req.headers.authorization as string);
   const { jobDescription, approvedBullets: rawBullets, company, role, currentResume: rawCurrentResume, applicationId } = req.body;
@@ -1278,7 +1235,7 @@ app.post('/assemble/claude', requireAuth, async (req, res) => {
     console.error('[/assemble/claude] error:', err.message);
     return res.status(500).json({ success: false, error: err.message });
   }
-});
+}));
 
 // ── Cover letter (Claude writes a job-specific letter from profile + JD) ────────
 // Persistence mirrors tailor_results: content-addressed on (user_id, jd_hash,

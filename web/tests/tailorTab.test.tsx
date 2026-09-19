@@ -91,7 +91,7 @@ describe('TailorTab — generate flow', () => {
     await waitFor(() => expect(screen.getByText('Profile empty')).toBeInTheDocument());
   });
 
-  it('checking a bullet + Send to Builder calls /assemble/claude with the edited text and fires onAssembled', async () => {
+  it('checking a bullet + Weave in calls /assemble/claude with the edited text and fires onAssembled', async () => {
     const user = userEvent.setup();
     const fetchMock = vi.fn()
       .mockResolvedValueOnce({ ok: true, json: async () => goodResult })       // /tailor/claude
@@ -104,13 +104,13 @@ describe('TailorTab — generate flow', () => {
     await user.click(screen.getByRole('button', { name: /Generate with Claude AI/i }));
     await waitFor(() => screen.getByText('Claude Review'));
 
-    // Send is disabled until at least one bullet is approved
-    const sendBtn = screen.getByRole('button', { name: /to Builder/i });
+    // Weave in is disabled until at least one bullet is approved.
+    const sendBtn = screen.getByRole('button', { name: /Weave in/i });
     expect(sendBtn).toBeDisabled();
 
     await user.click(screen.getByRole('checkbox'));
-    expect(screen.getByRole('button', { name: /Send 1 to Builder/i })).toBeEnabled();
-    await user.click(screen.getByRole('button', { name: /Send 1 to Builder/i }));
+    expect(screen.getByRole('button', { name: /Weave in 1/i })).toBeEnabled();
+    await user.click(screen.getByRole('button', { name: /Weave in 1/i }));
 
     await waitFor(() => expect(onAssembled).toHaveBeenCalled());
 
